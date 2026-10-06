@@ -78,7 +78,7 @@ func ValidateRoot(root string) (string, error) {
 	if !st.IsDir() {
 		return "", errors.New("--root must be a directory")
 	}
-	return abs, nil
+	return lockfile.ResolveWithin(abs, ".")
 }
 
 func readProjectLock(root string) (*lockfile.File, string, error) {
@@ -112,7 +112,10 @@ func Diff() error {
 	if e != nil {
 		return e
 	}
-	md, _ := lockfile.ResolveWithin(root, l.Pack.ModsDir)
+	md, e := lockfile.ResolveWithin(root, l.Pack.ModsDir)
+	if e != nil {
+		return e
+	}
 	d, e := diff.Local(md, l)
 	if e != nil {
 		return e
@@ -384,7 +387,10 @@ func Add(ctx context.Context, args []string, in io.Reader) error {
 	if !found {
 		return fmt.Errorf("%s is not a new jar in %s", name, lf.Pack.ModsDir)
 	}
-	path := filepath.Join(modsDir, name)
+	path, err := lockfile.ResolveWithin(modsDir, name)
+	if err != nil {
+		return err
+	}
 	fmt.Println("Поиск источника", name+"...")
 	detected, err := newDetector().Detect(ctx, path)
 	if err != nil {
@@ -525,7 +531,11 @@ func Ignore(ctx context.Context, args []string, in io.Reader) error {
 		}
 	}
 	if entity.Filename == "" {
-		entity, err = newDetector().Detect(ctx, filepath.Join(modsDir, name))
+		path, resolveErr := lockfile.ResolveWithin(modsDir, name)
+		if resolveErr != nil {
+			return resolveErr
+		}
+		entity, err = newDetector().Detect(ctx, path)
 		if err != nil {
 			return err
 		}
@@ -620,7 +630,11 @@ func Init(ctx context.Context, in io.Reader) error {
 	var unknown []string
 	fmt.Println("\nScanning mods...")
 	for i, n := range jars {
-		m, e := det.Detect(ctx, filepath.Join(modsDir, n))
+		path, resolveErr := lockfile.ResolveWithin(modsDir, n)
+		if resolveErr != nil {
+			return resolveErr
+		}
+		m, e := det.Detect(ctx, path)
 		if e != nil {
 			return e
 		}
@@ -639,7 +653,7 @@ func Init(ctx context.Context, in io.Reader) error {
 		}
 		fmt.Printf("[%d/%d] %s\n        %s\n", i+1, len(jars), n, sourceName(m.Source))
 		if m.Source == "" {
-			if e = providers.Copy(filepath.Join(modsDir, n), filepath.Join(tmp, n)); e != nil {
+			if e = providers.Copy(path, filepath.Join(tmp, n)); e != nil {
 				return e
 			}
 		}
@@ -669,7 +683,10 @@ func Init(ctx context.Context, in io.Reader) error {
 	}
 	for _, m := range f.Mods {
 		if m.Source == "repo" {
-			dst, _ := lockfile.ResolveWithin(root, m.Path)
+			dst, resolveErr := lockfile.ResolveWithin(root, m.Path)
+			if resolveErr != nil {
+				return resolveErr
+			}
 			if e = providers.Copy(filepath.Join(tmp, m.Filename), dst); e != nil {
 				return e
 			}

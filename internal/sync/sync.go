@@ -122,6 +122,11 @@ func Run(ctx context.Context, root string, progress Progress) (Result, error) {
 		removeNames = append(removeNames, name)
 	}
 	sort.Strings(removeNames)
+	for _, name := range append(append([]string{}, removeNames...), installNames...) {
+		if _, err := lockfile.ResolveWithin(modsDir, name); err != nil {
+			return Result{}, err
+		}
+	}
 
 	// Find existing names case-insensitively so Windows and Linux agree about
 	// collisions and filename changes. Unmanaged files are never overwritten.

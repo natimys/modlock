@@ -5,16 +5,21 @@ package sync
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"syscall"
 	"unsafe"
+
+	"modlock/internal/lockfile"
 )
 
 var lockFileEx = syscall.NewLazyDLL("kernel32.dll").NewProc("LockFileEx")
 var unlockFileEx = syscall.NewLazyDLL("kernel32.dll").NewProc("UnlockFileEx")
 
 func acquireSyncLock(root string) (func(), error) {
-	f, err := os.OpenFile(filepath.Join(root, ".modlock-sync.lock"), os.O_CREATE|os.O_RDWR, 0600)
+	path, err := lockfile.ResolveWithin(root, ".modlock-sync.lock")
+	if err != nil {
+		return nil, err
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0600)
 	if err != nil {
 		return nil, err
 	}

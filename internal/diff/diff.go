@@ -63,6 +63,9 @@ func Local(modsDir string, lock *lockfile.File) (Result, error) {
 	}
 	for _, e := range entries {
 		if !e.IsDir() && strings.EqualFold(filepath.Ext(e.Name()), ".jar") {
+			if _, err := lockfile.ResolveWithin(modsDir, e.Name()); err != nil {
+				return Result{}, err
+			}
 			b[e.Name()] = true
 		}
 	}

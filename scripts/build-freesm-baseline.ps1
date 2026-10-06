@@ -2,6 +2,7 @@
 param(
     [string]$Source = (Join-Path $PSScriptRoot '..\..\FreesmLauncher'),
     [string]$Tools = (Join-Path $PSScriptRoot '..\.cache'),
+    [string]$Python,
     [ValidateSet('Debug', 'Release')][string]$Configuration = 'Debug',
     [ValidateRange(1, 64)][int]$Jobs = 4
 )
@@ -27,6 +28,16 @@ $ctest = Join-Path $Tools 'build-python\cmake\data\bin\ctest.exe'
 $ninja = Join-Path $Tools 'build-python\bin'
 $qt = Join-Path $Tools 'Qt\6.10.2\msvc2022_64'
 $env:Path = "$(Split-Path $cmake);$ninja;$qt\bin;$env:Path"
+if ($Python) {
+    $Python = (Resolve-Path -LiteralPath $Python).Path
+    $env:Path = "$(Split-Path $Python);$env:Path"
+} else {
+    $Python = (Get-Command python.exe -ErrorAction Stop).Source
+}
+& $Python --version
+if ($LASTEXITCODE -ne 0) { throw 'A working Python >= 3.7 is required by the vcpkg Meson overlay; pass -Python with its full executable path.' }
+$env:CMAKE_PROGRAM_PATH = Split-Path $Python
+$env:VCPKG_KEEP_ENV_VARS = "$env:VCPKG_KEEP_ENV_VARS;CMAKE_PROGRAM_PATH"
 $env:CMAKE_PREFIX_PATH = $qt
 $env:VCPKG_ROOT = Join-Path $Tools 'vcpkg'
 $env:ARTIFACT_NAME = 'Windows-MSVC-Qt6'

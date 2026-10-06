@@ -125,7 +125,10 @@ type Summary struct {
 }
 
 func Prepare(ctx context.Context, root string, old *lockfile.File, ignored *ignorefile.File, progress func(int, int, string, string)) (*lockfile.File, map[string]string, []string, Summary, error) {
-	modsDir, _ := lockfile.ResolveWithin(root, old.Pack.ModsDir)
+	modsDir, resolveErr := lockfile.ResolveWithin(root, old.Pack.ModsDir)
+	if resolveErr != nil {
+		return nil, nil, nil, Summary{}, resolveErr
+	}
 	d, e := diff.Local(modsDir, old)
 	if e != nil {
 		return nil, nil, nil, Summary{}, e

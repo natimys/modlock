@@ -17,6 +17,10 @@ The Go baseline passes `go test ./...`.
 
 The Go CLI now accepts an explicit `--root`, including empty instance directories,
 while retaining automatic discovery for legacy calls. It is not yet connected to Qt.
+Path resolution now rejects traversal, Windows alternate data streams and reserved
+names, symlinks, and junctions. Errors are propagated before scanning or modifying
+affected files. The symlink regression test ran successfully on this Windows host;
+the complete Go test suite passes.
 
 ## Local Windows baseline
 
@@ -28,6 +32,8 @@ source directory is the sibling `FreesmLauncher` checkout.
 The tools below are installed in the ignored `.cache` directory of ModLock:
 
 - MSVC 2022: installed system tools, version 14.44.35207
+- Python 3.12 (a working interpreter is required by the Meson overlay;
+  the Windows Store execution alias is insufficient)
 - CMake 3.31.6, Ninja 1.11.1.4
 - Qt 6.10.2 `win64_msvc2022_64`, with `qtimageformats` and `qtnetworkauth`
 - aqtinstall 3.1.21
@@ -47,10 +53,17 @@ git -C .cache\vcpkg checkout 434307da09bc05b2c86996dccc8b2351fc0d5d37
 & .\scripts\build-freesm-baseline.ps1 -Configuration Debug
 ```
 
+If `python.exe` on PATH is an inactive Windows Store alias, pass
+`-Python 'C:\path\to\python.exe'` to the build script. This prepends the real
+interpreter to PATH without changing system settings.
+The script also preserves `CMAKE_PROGRAM_PATH` in vcpkg's build environment so
+its Meson overlay selects the same Python interpreter.
+
 The fork's `ModLock Windows baseline` workflow runs on Windows 2022 with
 MSVC x64, Qt 6.10.2, and the existing dependency setup action. Its checkout
 is pinned to the unchanged upstream revision. The output is an upstream
 Freesm baseline, not an integrated ModLock release.
+Initial CI run: https://github.com/natimys/FreesmLauncher/actions/runs/37504128242
 
 ## Integration constraints to retain
 

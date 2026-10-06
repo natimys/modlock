@@ -17,7 +17,10 @@ const LegacyFilename = "modlock.lock"
 
 func FindPath(root string) (string, error) {
 	for _, name := range []string{DefaultFilename, LegacyFilename} {
-		p := filepath.Join(root, name)
+		p, err := ResolveWithin(root, name)
+		if err != nil {
+			return "", err
+		}
 		if _, err := os.Stat(p); err == nil {
 			return p, nil
 		}
@@ -148,6 +151,9 @@ func (f *File) Validate() error {
 	seen := map[string]bool{}
 	identities := map[string]bool{}
 	for i, m := range f.Mods {
+		if err := safeRelative(m.Filename); err != nil || strings.ContainsAny(m.Filename, "/\\") {
+			return fmt.Errorf("mods[%d]: invalid filename", i)
+		}
 		if m.Filename == "" || filepath.Base(m.Filename) != m.Filename || strings.ToLower(filepath.Ext(m.Filename)) != ".jar" {
 			return fmt.Errorf("mods[%d]: invalid filename", i)
 		}
@@ -176,10 +182,28 @@ func (f *File) Validate() error {
 }
 
 func safeRelative(p string) error {
-	if p == "" || filepath.IsAbs(p) {
+	portable := strings.ReplaceAll(p, "\\", "/")
+	if p == "" || filepath.IsAbs(p) || strings.HasPrefix(portable, "/") || strings.ContainsAny(portable, ":\x00") {
 		return fmt.Errorf("must be a relative path")
 	}
-	c := filepath.Clean(filepath.FromSlash(p))
+	for _, component := range strings.Split(portable, "/") {
+		if component == "." || component == ".." {
+			continue
+		}
+		if strings.TrimRight(component, " .") != component {
+			return fmt.Errorf("trailing spaces and dots are not allowed")
+		}
+		name := strings.ToUpper(strings.SplitN(component, ".", 2)[0])
+		if name == "CON" || name == "PRN" || name == "AUX" || name == "NUL" || (len(name) == 4 && (strings.HasPrefix(name, "COM") || strings.HasPrefix(name, "LPT")) && name[3] >= '1' && name[3] <= '9') {
+			return fmt.Errorf("reserved Windows filename")
+		}
+		for _, ch := range component {
+			if ch < 32 || strings.ContainsRune("<>\"|?*", ch) {
+				return fmt.Errorf("invalid path character")
+			}
+		}
+	}
+	c := filepath.Clean(filepath.FromSlash(portable))
 	if c == ".." || strings.HasPrefix(c, ".."+string(filepath.Separator)) {
 		return fmt.Errorf("path escapes project root")
 	}
@@ -206,11 +230,36 @@ func ResolveWithin(root, rel string) (string, error) {
 	if err := safeRelative(rel); err != nil {
 		return "", err
 	}
-	rootAbs, _ := filepath.Abs(root)
-	target, _ := filepath.Abs(filepath.Join(root, filepath.FromSlash(rel)))
+	rootAbs, err := filepath.Abs(root)
+	if err != nil {
+		return "", err
+	}
+	target, err := filepath.Abs(filepath.Join(rootAbs, filepath.FromSlash(strings.ReplaceAll(rel, "\\", "/"))))
+	if err != nil {
+		return "", err
+	}
 	r, err := filepath.Rel(rootAbs, target)
 	if err != nil || r == ".." || strings.HasPrefix(r, ".."+string(filepath.Separator)) {
 		return "", fmt.Errorf("path escapes root")
+	}
+	// Refuse existing links at every component, including the instance root.
+	// Checking the lexical path alone does not protect against junctions.
+	current := rootAbs
+	parts := append([]string{""}, strings.Split(r, string(filepath.Separator))...)
+	for _, part := range parts {
+		if part != "" && part != "." {
+			current = filepath.Join(current, part)
+		}
+		linked, linkErr := isLink(current)
+		if os.IsNotExist(linkErr) {
+			break
+		}
+		if linkErr != nil {
+			return "", linkErr
+		}
+		if linked {
+			return "", fmt.Errorf("symlink or junction is not allowed: %s", current)
+		}
 	}
 	return target, nil
 }
