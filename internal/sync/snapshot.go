@@ -125,5 +125,8 @@ func Check(ctx context.Context, root string, progress Progress) (Preview, error)
 		return Preview{}, err
 	}
 	defer snapshot.Close()
+	if err := requireSupportedInstallSchema(old, snapshot.Lock); err != nil {
+		return Preview{}, err
+	}
 	return Preview{Revision: snapshot.Revision, Lock: snapshot.Lock, Diff: diff.Locks(old, snapshot.Lock)}, nil
 }

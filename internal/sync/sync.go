@@ -57,12 +57,18 @@ func run(ctx context.Context, root, revision string, progress Progress) (Result,
 	if err != nil {
 		return Result{}, err
 	}
+	if err := requireSupportedInstallSchema(old, nil); err != nil {
+		return Result{}, err
+	}
 	snapshot, err := Fetch(ctx, old.Pack, revision, progress)
 	if err != nil {
 		return Result{}, err
 	}
 	defer snapshot.Close()
 	repoDir, remoteLock, next := snapshot.RepoDir, snapshot.LockPath, snapshot.Lock
+	if err := requireSupportedInstallSchema(old, next); err != nil {
+		return Result{}, err
+	}
 	if filepath.Clean(filepath.FromSlash(next.Pack.ModsDir)) != filepath.Clean(filepath.FromSlash(old.Pack.ModsDir)) {
 		return Result{}, fmt.Errorf("unsupported migration: remote pack.mods_dir changed from %q to %q", old.Pack.ModsDir, next.Pack.ModsDir)
 	}
@@ -292,4 +298,16 @@ func run(ctx context.Context, root, revision string, progress Progress) (Result,
 		_ = os.Remove(oldPath)
 	}
 	return Result{Diff: d, Revision: snapshot.Revision}, nil
+}
+
+func requireSupportedInstallSchema(local, remote *lockfile.File) error {
+	for _, file := range []*lockfile.File{local, remote} {
+		if file == nil {
+			continue
+		}
+		if file.Schema != 1 || len(file.Files) != 0 {
+			return failure.Wrap(failure.UnsupportedFormat, fmt.Errorf("schema %d managed-file packs require the transactional schema 2 installer", file.Schema))
+		}
+	}
+	return nil
 }

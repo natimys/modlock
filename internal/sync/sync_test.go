@@ -12,8 +12,21 @@ import (
 	git "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing/object"
 
+	"modlock/internal/failure"
 	"modlock/internal/lockfile"
 )
+
+func TestSchema2ApplicationFailsClosed(t *testing.T) {
+	local := &lockfile.File{Schema: 1}
+	remote := &lockfile.File{Schema: 2}
+	if err := requireSupportedInstallSchema(local, remote); failure.Code(err) != failure.UnsupportedFormat {
+		t.Fatalf("schema 2 must fail closed, got error=%v code=%s", err, failure.Code(err))
+	}
+	remote = &lockfile.File{Schema: 1, Files: []lockfile.ManagedFile{{Path: "config/a", Target: "config/a", Policy: "replace"}}}
+	if err := requireSupportedInstallSchema(local, remote); failure.Code(err) != failure.UnsupportedFormat {
+		t.Fatalf("managed files must fail closed, got error=%v code=%s", err, failure.Code(err))
+	}
+}
 
 func TestRepoSourceSync(t *testing.T) {
 	remote := filepath.Join(t.TempDir(), "remote")
