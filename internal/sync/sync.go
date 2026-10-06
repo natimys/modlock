@@ -311,3 +311,9 @@ func requireSupportedInstallSchema(local, remote *lockfile.File) error {
 	}
 	return nil
 }
+
+// ValidateInstallSchema rejects formats that the transactional installer cannot
+// safely apply. It is shared by updates and first-time instance installation.
+func ValidateInstallSchema(local, remote *lockfile.File) error {
+	return requireSupportedInstallSchema(local, remote)
+}

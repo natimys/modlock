@@ -13,8 +13,12 @@ import (
 	"testing"
 	"time"
 
+	git "github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/plumbing/object"
+
 	"modlock/internal/authorconfig"
 	"modlock/internal/failure"
+	"modlock/internal/lockfile"
 )
 
 type fragmented struct{ io.Reader }
@@ -78,6 +82,62 @@ func TestBridgeSavesSeparateAuthorSettings(t *testing.T) {
 	}
 	if len(settings.IncludeDirs) != 1 || len(settings.ExcludePaths) != 1 || len(settings.IgnoredModIDs) != 1 {
 		t.Fatalf("settings: %#v", settings)
+	}
+}
+
+func TestBridgeInstallsExactPreviewedSchema1Pack(t *testing.T) {
+	repository := filepath.Join(t.TempDir(), "pack source")
+	if err := os.MkdirAll(filepath.Join(repository, "files", "mods"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repository, "files", "mods", "example.jar"), []byte("jar payload"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	pack := lockfile.Pack{Repository: repository, Branch: "master", LockPath: "mod.lock", ModsDir: "mods"}
+	if err := lockfile.Write(filepath.Join(repository, "mod.lock"), &lockfile.File{Schema: 1, Pack: pack, Mods: []lockfile.ModEntry{{ID: "example", Filename: "example.jar", Source: "repo", Path: "files/mods/example.jar"}}}); err != nil {
+		t.Fatal(err)
+	}
+	repo, err := git.PlainInit(repository, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	worktree, err := repo.Worktree()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = worktree.Add("."); err != nil {
+		t.Fatal(err)
+	}
+	revision, err := worktree.Commit("publish pack", &git.CommitOptions{Author: &object.Signature{Name: "test", Email: "test@example.com", When: time.Now()}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(t.TempDir(), "Новый экземпляр")
+	if err = os.MkdirAll(root, 0755); err != nil {
+		t.Fatal(err)
+	}
+	params, err := json.Marshal(map[string]any{"pack": pack, "revision": revision.String()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := json.Marshal(map[string]any{"type": "request", "id": "install", "operation": "install", "params": json.RawMessage(params)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	if err := Run([]string{"--protocol", "1", "--root", root}, bytes.NewReader(append(request, '\n')), &output); err != nil {
+		t.Fatal(err)
+	}
+	events := events(t, output.Bytes())
+	if len(events) < 2 || events[len(events)-1].Error != nil {
+		t.Fatalf("install events: %#v", events)
+	}
+	if got, err := os.ReadFile(filepath.Join(root, "mods", "example.jar")); err != nil || string(got) != "jar payload" {
+		t.Fatalf("installed jar = %q, %v", got, err)
+	}
+	installed, err := lockfile.Read(filepath.Join(root, lockfile.DefaultFilename))
+	if err != nil || installed.Pack.Repository != repository {
+		t.Fatalf("installed manifest = %#v, %v", installed, err)
 	}
 }
 

@@ -6,6 +6,8 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 
 	"modlock/internal/app"
 	"modlock/internal/authorconfig"
@@ -36,7 +38,7 @@ func Run(args []string, input io.Reader, output io.Writer) error {
 	return Serve(context.Background(), input, output, func(ctx context.Context, request Request, progress func(string)) (any, error) {
 		switch request.Operation {
 		case "capabilities":
-			return map[string]any{"protocol": Protocol, "version": buildinfo.Version, "loader_protocol": buildinfo.LoaderProtocol, "schemas": []int{1}, "operations": []string{"capabilities", "read", "check", "apply", "scan", "save-author-settings"}, "cancel": true}, nil
+			return map[string]any{"protocol": Protocol, "version": buildinfo.Version, "loader_protocol": buildinfo.LoaderProtocol, "schemas": []int{1}, "operations": []string{"capabilities", "read", "install", "check", "apply", "scan", "save-author-settings"}, "cancel": true}, nil
 		case "read":
 			var source lockfile.Pack
 			if err := decode(request.Params, &source); err != nil {
@@ -48,6 +50,37 @@ func Run(args []string, input io.Reader, output io.Writer) error {
 			}
 			defer snapshot.Close()
 			return map[string]any{"revision": snapshot.Revision, "lock": snapshot.Lock}, nil
+		case "install":
+			var params struct {
+				Pack     lockfile.Pack `json:"pack"`
+				Revision string        `json:"revision"`
+			}
+			if err := decode(request.Params, &params); err != nil {
+				return nil, failure.Wrap(failure.InvalidRequest, err)
+			}
+			if params.Revision == "" {
+				return nil, failure.Wrap(failure.InvalidRequest, fmt.Errorf("previewed revision is required"))
+			}
+			if existing, err := lockfile.FindPath(directory); err == nil {
+				return nil, failure.Wrap(failure.Conflict, fmt.Errorf("instance already contains a ModLock manifest: %s", existing))
+			} else if !os.IsNotExist(err) {
+				return nil, err
+			}
+			snapshot, err := syncer.Fetch(ctx, params.Pack, params.Revision, progress)
+			if err != nil {
+				return nil, err
+			}
+			defer snapshot.Close()
+			if err := syncer.ValidateInstallSchema(nil, snapshot.Lock); err != nil {
+				return nil, err
+			}
+			// Seed the temporary instance with the exact previewed manifest. RunRevision
+			// then performs the regular transactional install from that same commit.
+			bootstrap := filepath.Join(directory, lockfile.DefaultFilename)
+			if err := lockfile.Write(bootstrap, snapshot.Lock); err != nil {
+				return nil, err
+			}
+			return syncer.RunRevision(ctx, directory, params.Revision, progress)
 		case "check":
 			return syncer.Check(ctx, directory, progress)
 		case "apply":
