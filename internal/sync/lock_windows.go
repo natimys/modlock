@@ -8,6 +8,7 @@ import (
 	"syscall"
 	"unsafe"
 
+	"modlock/internal/failure"
 	"modlock/internal/lockfile"
 )
 
@@ -29,7 +30,7 @@ func acquireSyncLock(root string) (func(), error) {
 	r, _, _ := lockFileEx.Call(f.Fd(), exclusive|failImmediately, 0, 1, 0, uintptr(unsafe.Pointer(&ov)))
 	if r == 0 {
 		_ = f.Close()
-		return nil, fmt.Errorf("another ModLock sync is already running")
+		return nil, failure.Wrap(failure.Busy, fmt.Errorf("another ModLock sync is already running"))
 	}
 	return func() { unlockFileEx.Call(f.Fd(), 0, 1, 0, uintptr(unsafe.Pointer(&ov))); _ = f.Close() }, nil
 }

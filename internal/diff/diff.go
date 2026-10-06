@@ -10,12 +10,16 @@ import (
 )
 
 type Result struct {
-	Added, Removed []string
-	Updated        []Update
-	Unchanged      int
+	Added     []string `json:"added"`
+	Removed   []string `json:"removed"`
+	Updated   []Update `json:"updated"`
+	Unchanged int      `json:"unchanged"`
 }
 
-type Update struct{ Old, New lockfile.ModEntry }
+type Update struct {
+	Old lockfile.ModEntry `json:"old"`
+	New lockfile.ModEntry `json:"new"`
+}
 
 func Locks(old, next *lockfile.File) Result {
 	a, b := map[string]lockfile.ModEntry{}, map[string]lockfile.ModEntry{}

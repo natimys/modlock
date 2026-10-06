@@ -6,6 +6,7 @@ import (
 	"os"
 
 	"modlock/internal/app"
+	"modlock/internal/bridge"
 	"modlock/internal/buildinfo"
 	"modlock/internal/updater"
 )
@@ -26,6 +27,13 @@ func main() {
 			os.Exit(1)
 		}
 	}
+	if len(os.Args) > 1 && os.Args[1] == "bridge" {
+		if err := bridge.Run(os.Args[2:], os.Stdin, os.Stdout); err != nil {
+			fmt.Fprintln(os.Stderr, "ModLock bridge:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	args, root, argErr := splitRoot(os.Args[1:])
 	if argErr == nil && root != "" {
 		root, argErr = app.ValidateRoot(root)
@@ -38,6 +46,15 @@ func main() {
 		os.Exit(2)
 	}
 	os.Args = append([]string{os.Args[0]}, args...)
+	if len(args) > 0 && args[0] == "bridge" {
+		bridgeArgs := append([]string{}, args[1:]...)
+		bridgeArgs = append(bridgeArgs, "--root", os.Getenv(app.ExplicitRootEnv))
+		if err := bridge.Run(bridgeArgs, os.Stdin, os.Stdout); err != nil {
+			fmt.Fprintln(os.Stderr, "ModLock bridge:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	manualUpdateCommand := len(os.Args) > 1 && os.Args[1] == "self-update"
 	if os.Getenv("MODLOCK_SKIP_UPDATE") == "" && !manualUpdateCommand {
 		if updated, updateErr := updater.AutomaticCheck(ctx); updateErr != nil {

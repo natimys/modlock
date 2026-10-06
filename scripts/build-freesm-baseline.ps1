@@ -3,6 +3,7 @@ param(
     [string]$Source = (Join-Path $PSScriptRoot '..\..\FreesmLauncher'),
     [string]$Tools = (Join-Path $PSScriptRoot '..\.cache'),
     [string]$Python,
+    [string]$JavaHome,
     [ValidateSet('Debug', 'Release')][string]$Configuration = 'Debug',
     [ValidateRange(1, 64)][int]$Jobs = 4
 )
@@ -38,6 +39,14 @@ if ($Python) {
 if ($LASTEXITCODE -ne 0) { throw 'A working Python >= 3.7 is required by the vcpkg Meson overlay; pass -Python with its full executable path.' }
 $env:CMAKE_PROGRAM_PATH = Split-Path $Python
 $env:VCPKG_KEEP_ENV_VARS = "$env:VCPKG_KEEP_ENV_VARS;CMAKE_PROGRAM_PATH"
+if (-not $JavaHome) { $JavaHome = $env:JAVA_HOME }
+if (-not $JavaHome) { throw 'JDK 17 is required; pass -JavaHome with its installation directory.' }
+$JavaHome = (Resolve-Path -LiteralPath $JavaHome).Path
+$javac = Join-Path $JavaHome 'bin\javac.exe'
+$javaVersion = & $javac -version 2>&1
+if ($LASTEXITCODE -ne 0 -or "$javaVersion" -notmatch '^javac 17\.') { throw 'Use JDK 17, matching the upstream MSVC workflow.' }
+$env:JAVA_HOME = $JavaHome
+$env:Path = "$JavaHome\bin;$env:Path"
 $env:CMAKE_PREFIX_PATH = $qt
 $env:VCPKG_ROOT = Join-Path $Tools 'vcpkg'
 $env:ARTIFACT_NAME = 'Windows-MSVC-Qt6'
@@ -53,7 +62,7 @@ try {
     $sourceChanges = & git diff --name-only 163424fc202e451f05ca360ef431209664691137 HEAD -- . ':(exclude).github/workflows/modlock-baseline.yml'
     if ($LASTEXITCODE -ne 0 -or $sourceChanges) { throw 'Launcher sources differ from the pinned upstream baseline.' }
     & git rev-parse HEAD
-    & $cmake --preset windows_msvc
+    & $cmake --preset windows_msvc "-DJava_JAVA_EXECUTABLE=$JavaHome/bin/java.exe" "-DJava_JAVAC_EXECUTABLE=$JavaHome/bin/javac.exe" "-DJava_JAR_EXECUTABLE=$JavaHome/bin/jar.exe"
     if ($LASTEXITCODE -ne 0) { throw 'CMake configuration failed.' }
     & $cmake --build --preset windows_msvc --config $Configuration --parallel $Jobs
     if ($LASTEXITCODE -ne 0) { throw 'Launcher build failed.' }

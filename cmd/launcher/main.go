@@ -18,6 +18,9 @@ import (
 func main() { os.Exit(run()) }
 
 func run() int {
+	if isBridgeCommand(os.Args[1:]) {
+		return runBundledBridge(os.Args[1:])
+	}
 	data, err := updater.DataDir()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "ModLock launcher:", err)
@@ -90,6 +93,42 @@ func run() int {
 	}
 
 	return runPayloadLoop(appVersion, fallbackAppPath, os.Args[1:], controlDir, productionDeps())
+}
+
+// Freesm's bridge must use the payload shipped with its loader. A CLI payload
+// selected in the shared self-update cache may implement a different contract.
+func runBundledBridge(args []string) int {
+	path := bundledPayload()
+	if path == "" {
+		fmt.Fprintln(os.Stderr, "ModLock bridge: verified bundled payload is missing")
+		return 1
+	}
+	cmd := exec.Command(path, args...)
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+	cmd.Env = filteredEnv(os.Environ(), "MODLOCK_SKIP_UPDATE", "MODLOCK_READY_FILE", "MODLOCK_HANDOFF_UPDATE", "MODLOCK_LAUNCHER", "MODLOCK_LAUNCHER_DIR")
+	cmd.Env = append(cmd.Env, "MODLOCK_SKIP_UPDATE=1", "MODLOCK_LAUNCHER=1", "MODLOCK_LAUNCHER_DIR="+filepath.Dir(path))
+	if err := cmd.Run(); err != nil {
+		if exit, ok := err.(*exec.ExitError); ok {
+			return exit.ExitCode()
+		}
+		fmt.Fprintln(os.Stderr, "ModLock bridge:", err)
+		return 1
+	}
+	return 0
+}
+
+func isBridgeCommand(args []string) bool {
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--root" {
+			i++
+			continue
+		}
+		if strings.HasPrefix(args[i], "--root=") {
+			continue
+		}
+		return args[i] == "bridge"
+	}
+	return false
 }
 
 type launcherDeps struct {

@@ -10,6 +10,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 	"modlock/internal/atomicfile"
+	"modlock/internal/failure"
 )
 
 const DefaultFilename = "mod.lock"
@@ -29,29 +30,29 @@ func FindPath(root string) (string, error) {
 }
 
 type File struct {
-	Schema int        `toml:"schema"`
-	Pack   Pack       `toml:"pack"`
-	Mods   []ModEntry `toml:"mods"`
+	Schema int        `toml:"schema" json:"schema"`
+	Pack   Pack       `toml:"pack" json:"pack"`
+	Mods   []ModEntry `toml:"mods" json:"mods"`
 }
 
 type Pack struct {
-	Repository string `toml:"repository"`
-	Branch     string `toml:"branch"`
-	LockPath   string `toml:"lock_path"`
-	ModsDir    string `toml:"mods_dir"`
+	Repository string `toml:"repository" json:"repository"`
+	Branch     string `toml:"branch" json:"branch"`
+	LockPath   string `toml:"lock_path" json:"lock_path"`
+	ModsDir    string `toml:"mods_dir" json:"mods_dir"`
 }
 
 type ModEntry struct {
-	ID        string `toml:"id,omitempty"`
-	Version   string `toml:"version,omitempty"`
-	Filename  string `toml:"filename"`
-	Source    string `toml:"source"`
-	ProjectID string `toml:"project_id,omitempty"`
-	VersionID string `toml:"version_id,omitempty"`
-	ModID     int64  `toml:"mod_id,omitempty"`
-	FileID    int64  `toml:"file_id,omitempty"`
-	URL       string `toml:"url,omitempty"`
-	Path      string `toml:"path,omitempty"`
+	ID        string `toml:"id,omitempty" json:"id,omitempty"`
+	Version   string `toml:"version,omitempty" json:"version,omitempty"`
+	Filename  string `toml:"filename" json:"filename"`
+	Source    string `toml:"source" json:"source"`
+	ProjectID string `toml:"project_id,omitempty" json:"project_id,omitempty"`
+	VersionID string `toml:"version_id,omitempty" json:"version_id,omitempty"`
+	ModID     int64  `toml:"mod_id,omitempty" json:"mod_id,omitempty"`
+	FileID    int64  `toml:"file_id,omitempty" json:"file_id,omitempty"`
+	URL       string `toml:"url,omitempty" json:"url,omitempty"`
+	Path      string `toml:"path,omitempty" json:"path,omitempty"`
 }
 
 // Identity returns a stable key for matching versions of the same mod.
@@ -89,11 +90,11 @@ func (m ModEntry) DisplayVersion() string {
 func Read(path string) (*File, error) {
 	var f File
 	if _, err := toml.DecodeFile(path, &f); err != nil {
-		return nil, fmt.Errorf("read lock file: %w", err)
+		return nil, failure.Wrap(failure.UnsupportedFormat, fmt.Errorf("read lock file: %w", err))
 	}
 	f.Defaults()
 	if err := f.Validate(); err != nil {
-		return nil, err
+		return nil, failure.Wrap(failure.UnsupportedFormat, err)
 	}
 	return &f, nil
 }

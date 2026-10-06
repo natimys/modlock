@@ -21,6 +21,18 @@ Path resolution now rejects traversal, Windows alternate data streams and reserv
 names, symlinks, and junctions. Errors are propagated before scanning or modifying
 affected files. The symlink regression test ran successfully on this Windows host;
 the complete Go test suite passes.
+The synchronization service now separates `Check` from `RunRevision`. Preview
+returns the Git commit and diff; applying requires the full commit hash and checks
+out that exact object. A regression test advances the branch between preview and
+apply and verifies that the previewed JAR content is installed.
+
+Protocol-1 bridge now exposes `capabilities`, `read`, `check`, and `apply` for
+schema 1, with NDJSON progress, cancellation, and typed errors. The loader uses
+its verified adjacent payload for bridge calls, bypassing shared CLI updates.
+Tests cover fragmented JSON, progress, cancellation, incompatible protocol,
+malformed/oversized messages, and branch movement between preview and apply.
+Real loader/payload smoke checks passed with spaces and Cyrillic in the root.
+See [bridge-protocol.md](bridge-protocol.md). Qt is not connected yet.
 
 ## Local Windows baseline
 
@@ -36,6 +48,7 @@ The tools below are installed in the ignored `.cache` directory of ModLock:
   the Windows Store execution alias is insufficient)
 - CMake 3.31.6, Ninja 1.11.1.4
 - Qt 6.10.2 `win64_msvc2022_64`, with `qtimageformats` and `qtnetworkauth`
+- JDK 17 (upstream CI uses Zulu 17; JDK 25 cannot compile the Java 7 helpers)
 - aqtinstall 3.1.21
 - vcpkg checkout `434307da09bc05b2c86996dccc8b2351fc0d5d37`
 - Dependency registry baseline comes from the unchanged launcher
@@ -50,7 +63,7 @@ python -m aqt install-qt windows desktop 6.10.2 win64_msvc2022_64 -O .cache\Qt -
 git clone --filter=blob:none https://github.com/microsoft/vcpkg.git .cache\vcpkg
 git -C .cache\vcpkg checkout 434307da09bc05b2c86996dccc8b2351fc0d5d37
 & .cache\vcpkg\bootstrap-vcpkg.bat -disableMetrics
-& .\scripts\build-freesm-baseline.ps1 -Configuration Debug
+& .\scripts\build-freesm-baseline.ps1 -Configuration Debug -JavaHome 'C:\path\to\jdk-17'
 ```
 
 If `python.exe` on PATH is an inactive Windows Store alias, pass
@@ -84,5 +97,6 @@ Initial CI run: https://github.com/natimys/FreesmLauncher/actions/runs/375041282
 - Separate app/data identity and fork update source must precede distributing
   an integrated build. Preserve existing licensing and upstream attribution.
 
-Bridge, schema 2, Qt import/update pages, author editor, bundled Go payload,
-and release acceptance checks are still pending implementation.
+Schema 2, the remaining bridge operations, Qt import/update pages, author editor,
+packaging a pinned Go payload with the launcher, and release acceptance checks
+are still pending implementation.

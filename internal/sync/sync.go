@@ -10,23 +10,39 @@ import (
 	"strings"
 	"time"
 
-	git "github.com/go-git/go-git/v5"
-	"github.com/go-git/go-git/v5/plumbing"
-
 	"modlock/internal/atomicfile"
 	"modlock/internal/diff"
+	"modlock/internal/failure"
 	"modlock/internal/lockfile"
 	"modlock/internal/providers"
 )
 
 type Progress func(string)
-type Result struct{ Diff diff.Result }
+type Result struct {
+	Diff     diff.Result `json:"diff"`
+	Revision string      `json:"revision"`
+}
 
 var commitLockFile = atomicfile.Commit
 var renameInstalledFile = os.Rename
 var restoreBackupFile = providers.Copy
 
 func Run(ctx context.Context, root string, progress Progress) (Result, error) {
+	return run(ctx, root, "", progress)
+}
+
+// RunRevision applies the commit returned by Check, even if the branch has moved.
+func RunRevision(ctx context.Context, root, revision string, progress Progress) (Result, error) {
+	if revision == "" {
+		return Result{}, fmt.Errorf("apply requires the previewed Git commit")
+	}
+	return run(ctx, root, revision, progress)
+}
+
+func run(ctx context.Context, root, revision string, progress Progress) (Result, error) {
+	if progress == nil {
+		progress = func(string) {}
+	}
 	release, err := acquireSyncLock(root)
 	if err != nil {
 		return Result{}, err
@@ -41,25 +57,12 @@ func Run(ctx context.Context, root string, progress Progress) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	tmp, err := os.MkdirTemp("", "modlock-sync-repo-")
+	snapshot, err := Fetch(ctx, old.Pack, revision, progress)
 	if err != nil {
 		return Result{}, err
 	}
-	defer os.RemoveAll(tmp)
-	repoDir := filepath.Join(tmp, "repo")
-	progress("Получение обновления...")
-	_, err = git.PlainCloneContext(ctx, repoDir, false, &git.CloneOptions{URL: old.Pack.Repository, ReferenceName: plumbing.NewBranchReferenceName(old.Pack.Branch), SingleBranch: true, Depth: 1})
-	if err != nil {
-		return Result{}, fmt.Errorf("clone repository: %w", err)
-	}
-	remoteLock, err := lockfile.ResolveWithin(repoDir, old.Pack.LockPath)
-	if err != nil {
-		return Result{}, err
-	}
-	next, err := lockfile.Read(remoteLock)
-	if err != nil {
-		return Result{}, fmt.Errorf("remote lock: %w", err)
-	}
+	defer snapshot.Close()
+	repoDir, remoteLock, next := snapshot.RepoDir, snapshot.LockPath, snapshot.Lock
 	if filepath.Clean(filepath.FromSlash(next.Pack.ModsDir)) != filepath.Clean(filepath.FromSlash(old.Pack.ModsDir)) {
 		return Result{}, fmt.Errorf("unsupported migration: remote pack.mods_dir changed from %q to %q", old.Pack.ModsDir, next.Pack.ModsDir)
 	}
@@ -144,7 +147,7 @@ func Run(ctx context.Context, root string, progress Progress) (Result, error) {
 	}
 	for _, name := range installNames {
 		if actual, ok := existing[strings.ToLower(name)]; ok && !managed[strings.ToLower(name)] {
-			return Result{}, fmt.Errorf("cannot install %s: it conflicts with unmanaged file %s", name, actual)
+			return Result{}, failure.Wrap(failure.Conflict, fmt.Errorf("cannot install %s: it conflicts with unmanaged file %s", name, actual))
 		}
 	}
 
@@ -191,7 +194,7 @@ func Run(ctx context.Context, root string, progress Progress) (Result, error) {
 					progress(fmt.Sprintf("Сетевая ошибка: %v\nПовтор через %s...", previous, wait))
 				}
 			}); err != nil {
-				return Result{}, fmt.Errorf("download %s: %w", name, err)
+				return Result{}, failure.Wrap(failure.Network, fmt.Errorf("download %s: %w", name, err))
 			}
 		}
 	}
@@ -252,11 +255,16 @@ func Run(ctx context.Context, root string, progress Progress) (Result, error) {
 		}
 		if len(restoreErrs) != 0 {
 			keepTxn = true
-			return fmt.Errorf("%w; rollback incomplete (%s); backups preserved at %s", cause, strings.Join(restoreErrs, "; "), backupDir)
+			return failure.Wrap(failure.Recovery, fmt.Errorf("%w; rollback incomplete (%s); backups preserved at %s", cause, strings.Join(restoreErrs, "; "), backupDir))
 		}
 		return cause
 	}
 
+	// Honour cancellation before beginning file mutations. Once they begin,
+	// complete the transaction or rollback instead of abandoning half an update.
+	if err = ctx.Err(); err != nil {
+		return Result{}, err
+	}
 	for _, name := range removeNames {
 		actual := existing[strings.ToLower(name)]
 		if actual == "" {
@@ -283,5 +291,5 @@ func Run(ctx context.Context, root string, progress Progress) (Result, error) {
 	if oldPath != targetLock {
 		_ = os.Remove(oldPath)
 	}
-	return Result{Diff: d}, nil
+	return Result{Diff: d, Revision: snapshot.Revision}, nil
 }

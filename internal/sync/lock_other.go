@@ -7,6 +7,7 @@ import (
 	"os"
 	"syscall"
 
+	"modlock/internal/failure"
 	"modlock/internal/lockfile"
 )
 
@@ -21,7 +22,7 @@ func acquireSyncLock(root string) (func(), error) {
 	}
 	if err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		_ = f.Close()
-		return nil, fmt.Errorf("another ModLock sync is already running")
+		return nil, failure.Wrap(failure.Busy, fmt.Errorf("another ModLock sync is already running"))
 	}
 	return func() { _ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN); _ = f.Close() }, nil
 }
