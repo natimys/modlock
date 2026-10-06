@@ -13,6 +13,7 @@ import (
 	git "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 
+	"modlock/internal/atomicfile"
 	"modlock/internal/diff"
 	"modlock/internal/lockfile"
 	"modlock/internal/providers"
@@ -21,7 +22,17 @@ import (
 type Progress func(string)
 type Result struct{ Diff diff.Result }
 
+var commitLockFile = atomicfile.Commit
+var renameInstalledFile = os.Rename
+var restoreBackupFile = providers.Copy
+
 func Run(ctx context.Context, root string, progress Progress) (Result, error) {
+	release, err := acquireSyncLock(root)
+	if err != nil {
+		return Result{}, err
+	}
+	defer release()
+
 	oldPath, err := lockfile.FindPath(root)
 	if err != nil {
 		return Result{}, fmt.Errorf("find mod.lock: %w", err)
@@ -30,7 +41,7 @@ func Run(ctx context.Context, root string, progress Progress) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	tmp, err := os.MkdirTemp("", "modlock-sync-")
+	tmp, err := os.MkdirTemp("", "modlock-sync-repo-")
 	if err != nil {
 		return Result{}, err
 	}
@@ -49,16 +60,19 @@ func Run(ctx context.Context, root string, progress Progress) (Result, error) {
 	if err != nil {
 		return Result{}, fmt.Errorf("remote lock: %w", err)
 	}
+	if filepath.Clean(filepath.FromSlash(next.Pack.ModsDir)) != filepath.Clean(filepath.FromSlash(old.Pack.ModsDir)) {
+		return Result{}, fmt.Errorf("unsupported migration: remote pack.mods_dir changed from %q to %q", old.Pack.ModsDir, next.Pack.ModsDir)
+	}
+	newLockBytes, err := os.ReadFile(remoteLock)
+	if err != nil {
+		return Result{}, err
+	}
 	d := diff.Locks(old, next)
 	modsDir, err := lockfile.ResolveWithin(root, old.Pack.ModsDir)
 	if err != nil {
 		return Result{}, err
 	}
-	if err = os.MkdirAll(modsDir, 0755); err != nil {
-		return Result{}, err
-	}
-	// The lock describes the desired state, not proof that its files are installed.
-	// A fresh instance may have the latest bootstrap lock and an empty mods folder.
+
 	install := make(map[string]bool, len(d.Added)+len(d.Updated))
 	for _, name := range d.Added {
 		install[name] = true
@@ -94,9 +108,6 @@ func Run(ctx context.Context, root string, progress Progress) (Result, error) {
 			removeSet[update.Old.Filename] = true
 		}
 	}
-	// Reconcile every entry that was managed by the previous lock against the
-	// new lock as well. This keeps deletion tied to the desired lock state even
-	// when two lock entries have different identities or legacy metadata.
 	desired := make(map[string]bool, len(next.Mods))
 	for _, m := range next.Mods {
 		desired[strings.ToLower(m.Filename)] = true
@@ -111,7 +122,44 @@ func Run(ctx context.Context, root string, progress Progress) (Result, error) {
 		removeNames = append(removeNames, name)
 	}
 	sort.Strings(removeNames)
-	stage := filepath.Join(tmp, "stage")
+
+	// Find existing names case-insensitively so Windows and Linux agree about
+	// collisions and filename changes. Unmanaged files are never overwritten.
+	existing := map[string]string{}
+	entries, readErr := os.ReadDir(modsDir)
+	if readErr != nil && !os.IsNotExist(readErr) {
+		return Result{}, readErr
+	}
+	managed := map[string]bool{}
+	for _, m := range old.Mods {
+		managed[strings.ToLower(m.Filename)] = true
+	}
+	for _, entry := range entries {
+		existing[strings.ToLower(entry.Name())] = entry.Name()
+	}
+	for _, name := range installNames {
+		if actual, ok := existing[strings.ToLower(name)]; ok && !managed[strings.ToLower(name)] {
+			return Result{}, fmt.Errorf("cannot install %s: it conflicts with unmanaged file %s", name, actual)
+		}
+	}
+
+	if err = os.MkdirAll(modsDir, 0755); err != nil {
+		return Result{}, err
+	}
+	txnDir, err := os.MkdirTemp(modsDir, ".modlock-sync-")
+	if err != nil {
+		return Result{}, err
+	}
+	keepTxn := false
+	defer func() {
+		if !keepTxn {
+			_ = os.RemoveAll(txnDir)
+		}
+	}()
+	stage := filepath.Join(txnDir, "stage")
+	if err = os.Mkdir(stage, 0755); err != nil {
+		return Result{}, err
+	}
 	client := &http.Client{Timeout: 2 * time.Minute}
 	byName := map[string]lockfile.ModEntry{}
 	for _, m := range next.Mods {
@@ -142,63 +190,90 @@ func Run(ctx context.Context, root string, progress Progress) (Result, error) {
 			}
 		}
 	}
-	backup := filepath.Join(tmp, "backup")
-	var changed []string
-	rollback := func() {
-		for _, n := range changed {
-			os.Remove(filepath.Join(modsDir, n))
-			b := filepath.Join(backup, n)
-			if _, e := os.Stat(b); e == nil {
-				_ = providers.Copy(b, filepath.Join(modsDir, n))
-			}
-		}
-	}
+
+	// Build one case-insensitive list of affected paths and fully back it up.
+	affected := map[string]string{}
 	for _, name := range append(append([]string{}, removeNames...), installNames...) {
-		target := filepath.Join(modsDir, name)
-		if _, e := os.Stat(target); e == nil {
-			if e = providers.Copy(target, filepath.Join(backup, name)); e != nil {
-				rollback()
-				return Result{}, e
-			}
-		}
-		changed = append(changed, name)
-	}
-	for _, name := range removeNames {
-		if err = os.Remove(filepath.Join(modsDir, name)); err != nil && !os.IsNotExist(err) {
-			rollback()
-			return Result{}, err
+		key := strings.ToLower(name)
+		if _, ok := affected[key]; !ok {
+			affected[key] = name
 		}
 	}
-	for _, name := range installNames {
-		if err = os.Remove(filepath.Join(modsDir, name)); err != nil && !os.IsNotExist(err) {
-			rollback()
-			return Result{}, err
-		}
+	var keys []string
+	for key := range affected {
+		keys = append(keys, key)
 	}
-	for _, name := range installNames {
-		if err = os.Rename(filepath.Join(stage, name), filepath.Join(modsDir, name)); err != nil {
-			rollback()
-			return Result{}, err
-		}
-	}
-	newLockBytes, err := os.ReadFile(remoteLock)
-	if err != nil {
-		rollback()
+	sort.Strings(keys)
+	backupDir := filepath.Join(txnDir, "backup")
+	if err = os.Mkdir(backupDir, 0755); err != nil {
 		return Result{}, err
+	}
+	type backup struct{ name, actual, path string }
+	backups := make([]backup, 0, len(keys))
+	for i, key := range keys {
+		name := affected[key]
+		actual, exists := existing[key]
+		if !exists {
+			continue
+		}
+		backupPath := filepath.Join(backupDir, fmt.Sprintf("%04d.bak", i))
+		if err = providers.Copy(filepath.Join(modsDir, actual), backupPath); err != nil {
+			return Result{}, fmt.Errorf("backup %s: %w", actual, err)
+		}
+		backups = append(backups, backup{name: name, actual: actual, path: backupPath})
 	}
 	targetLock := filepath.Join(root, lockfile.DefaultFilename)
-	lockTmp := targetLock + ".tmp"
-	if err = os.WriteFile(lockTmp, newLockBytes, 0644); err != nil {
-		rollback()
-		return Result{}, err
-	}
-	if err = os.Rename(lockTmp, targetLock); err != nil {
-		os.Remove(targetLock)
-		err = os.Rename(lockTmp, targetLock)
-	}
+	lockTmp, err := atomicfile.Stage(targetLock, newLockBytes, 0644)
 	if err != nil {
-		rollback()
-		return Result{}, err
+		return Result{}, fmt.Errorf("prepare lock file: %w", err)
+	}
+	defer os.Remove(lockTmp)
+
+	rollback := func(cause error) error {
+		var restoreErrs []string
+		removeTargets := map[string]bool{}
+		for _, name := range append(append([]string{}, removeNames...), installNames...) {
+			removeTargets[name] = true
+		}
+		for name := range removeTargets {
+			if e := os.Remove(filepath.Join(modsDir, name)); e != nil && !os.IsNotExist(e) {
+				restoreErrs = append(restoreErrs, fmt.Sprintf("remove %s: %v", name, e))
+			}
+		}
+		for _, b := range backups {
+			if e := restoreBackupFile(b.path, filepath.Join(modsDir, b.actual)); e != nil {
+				restoreErrs = append(restoreErrs, fmt.Sprintf("restore %s: %v", b.actual, e))
+			}
+		}
+		if len(restoreErrs) != 0 {
+			keepTxn = true
+			return fmt.Errorf("%w; rollback incomplete (%s); backups preserved at %s", cause, strings.Join(restoreErrs, "; "), backupDir)
+		}
+		return cause
+	}
+
+	for _, name := range removeNames {
+		actual := existing[strings.ToLower(name)]
+		if actual == "" {
+			continue
+		}
+		if err = os.Remove(filepath.Join(modsDir, actual)); err != nil && !os.IsNotExist(err) {
+			return Result{}, rollback(fmt.Errorf("remove %s: %w", name, err))
+		}
+	}
+	for _, name := range installNames {
+		actual := existing[strings.ToLower(name)]
+		if actual != "" {
+			if err = os.Remove(filepath.Join(modsDir, actual)); err != nil && !os.IsNotExist(err) {
+				return Result{}, rollback(fmt.Errorf("replace %s: %w", name, err))
+			}
+		}
+		if err = renameInstalledFile(filepath.Join(stage, name), filepath.Join(modsDir, name)); err != nil {
+			return Result{}, rollback(fmt.Errorf("install %s: %w", name, err))
+		}
+	}
+	if err = commitLockFile(lockTmp, targetLock); err != nil {
+		return Result{}, rollback(fmt.Errorf("replace lock file: %w", err))
 	}
 	if oldPath != targetLock {
 		_ = os.Remove(oldPath)

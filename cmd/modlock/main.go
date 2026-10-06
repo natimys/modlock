@@ -18,6 +18,14 @@ func main() {
 		os.Exit(0)
 	}
 	ctx := context.Background()
+	// Readiness confirms local process initialization. Network update checks may
+	// take arbitrarily longer than the launcher's startup timeout.
+	if ready := os.Getenv("MODLOCK_READY_FILE"); ready != "" {
+		if err := readyGate(ready, buildinfo.Version, func() {}); err != nil {
+			fmt.Fprintln(os.Stderr, "ModLock: cannot signal readiness:", err)
+			os.Exit(1)
+		}
+	}
 	manualUpdateCommand := len(os.Args) > 1 && os.Args[1] == "self-update"
 	if os.Getenv("MODLOCK_SKIP_UPDATE") == "" && !manualUpdateCommand {
 		if updated, updateErr := updater.AutomaticCheck(ctx); updateErr != nil {
@@ -28,9 +36,6 @@ func main() {
 			}
 			fmt.Fprintln(os.Stderr, "ModLock: новая версия установлена; для её запуска откройте ModLock через modlock.exe.")
 		}
-	}
-	if ready := os.Getenv("MODLOCK_READY_FILE"); ready != "" {
-		_ = os.WriteFile(ready, []byte(buildinfo.Version), 0600)
 	}
 	var err error
 	if len(os.Args) == 1 {
@@ -104,4 +109,18 @@ func main() {
 		fmt.Fprintln(os.Stderr, "Error:", err)
 		os.Exit(1)
 	}
+}
+
+func writeReadyFile(path, version string) error {
+	return os.WriteFile(path, []byte(version), 0600)
+}
+
+func readyGate(path, version string, afterReady func()) error {
+	if path != "" {
+		if err := writeReadyFile(path, version); err != nil {
+			return err
+		}
+	}
+	afterReady()
+	return nil
 }

@@ -28,6 +28,11 @@ func FindRoot(requireLock bool) (string, error) {
 	if _, e := lockfile.FindPath(cwd); e == nil {
 		return cwd, nil
 	}
+	if launcherDir := os.Getenv("MODLOCK_LAUNCHER_DIR"); launcherDir != "" {
+		if _, e := lockfile.FindPath(launcherDir); e == nil {
+			return launcherDir, nil
+		}
+	}
 	exe, _ := os.Executable()
 	ed := filepath.Dir(exe)
 	if _, e := lockfile.FindPath(ed); e == nil {
@@ -36,6 +41,11 @@ func FindRoot(requireLock bool) (string, error) {
 	if !requireLock {
 		if st, e := os.Stat(filepath.Join(cwd, "mods")); e == nil && st.IsDir() {
 			return cwd, nil
+		}
+		if launcherDir := os.Getenv("MODLOCK_LAUNCHER_DIR"); launcherDir != "" {
+			if st, e := os.Stat(filepath.Join(launcherDir, "mods")); e == nil && st.IsDir() {
+				return launcherDir, nil
+			}
 		}
 		if st, e := os.Stat(filepath.Join(ed, "mods")); e == nil && st.IsDir() {
 			return ed, nil

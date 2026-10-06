@@ -72,3 +72,44 @@ func TestAddRepoSource(t *testing.T) {
 		t.Fatal("ignored repo artifact was not removed")
 	}
 }
+
+func TestFindRootUsesLauncherDirectoryBeforeCachedPayloadDirectory(t *testing.T) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	instance := filepath.Join(t.TempDir(), "Minecraft сборка с пробелами")
+	appCache := filepath.Join(t.TempDir(), "Local AppData", "ModLock", "versions", "1.2.3")
+	if err = os.MkdirAll(instance, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.MkdirAll(appCache, 0755); err != nil {
+		t.Fatal(err)
+	}
+	lf := &lockfile.File{Schema: 1, Pack: lockfile.Pack{Repository: "https://example.test/pack.git", ModsDir: "mods"}}
+	if err = lockfile.Write(filepath.Join(instance, "mod.lock"), lf); err != nil {
+		t.Fatal(err)
+	}
+	if err = lockfile.Write(filepath.Join(appCache, "mod.lock"), lf); err != nil {
+		t.Fatal(err)
+	}
+	away := t.TempDir()
+	if err = os.Chdir(away); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(cwd)
+	t.Setenv("MODLOCK_LAUNCHER_DIR", instance)
+	got, err := FindRoot(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != instance {
+		t.Fatalf("FindRoot() = %q, want launcher instance %q", got, instance)
+	}
+	if err = os.Chdir(instance); err != nil {
+		t.Fatal(err)
+	}
+	if got, err = FindRoot(true); err != nil || got != instance {
+		t.Fatalf("cwd priority: FindRoot() = %q, %v", got, err)
+	}
+}

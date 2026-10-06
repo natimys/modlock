@@ -39,6 +39,17 @@ func parseVersion(raw string) (semver, error) {
 	return semver{values[0], values[1], values[2], pre}, nil
 }
 
+// validateVersionPath accepts only canonical directory names. Version
+// comparison remains permissive of a leading v and surrounding whitespace,
+// but pointer values are used directly in filesystem paths.
+func validateVersionPath(raw string) error {
+	if raw != strings.TrimSpace(raw) || strings.HasPrefix(raw, "v") {
+		return fmt.Errorf("invalid version directory %q", raw)
+	}
+	_, err := parseVersion(raw)
+	return err
+}
+
 func validIdentifiers(value string, prerelease bool) bool {
 	if value == "" {
 		return false

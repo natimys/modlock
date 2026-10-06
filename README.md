@@ -2,7 +2,7 @@
 
 ## Installing ModLock on Windows
 
-Download `modlock-windows-amd64.zip` from a stable GitHub Release and extract both `modlock.exe` and `modlock-app.exe` into the Minecraft instance folder. Run `modlock.exe`; it is the stable launcher. The launcher stores shared application versions under `%LOCALAPPDATA%\ModLock`, while the small launcher stays in the instance folder. Users upgrading an older standalone ModLock executable need to install the launcher bundle once.
+Download `modlock-windows-amd64.zip` from a stable GitHub Release and extract both `modlock.exe` and `modlock-app.exe` into the Minecraft instance folder. The first installation requires both executables. Run `modlock.exe`; it is the stable launcher. The launcher stores shared application versions under `%LOCALAPPDATA%\ModLock`, while the small launcher stays in the instance folder. Users upgrading an older standalone ModLock executable need to install the launcher bundle once. The stable launcher does not update itself, so replace `modlock.exe` once to receive launcher fixes.
 
 Release builds include their SemVer, commit, build date, and release repository. Local builds report version `dev` and do not self-update. The release repository is embedded by GitHub Actions from `GITHUB_REPOSITORY`, independently of the Minecraft pack repository in `mod.lock`.
 

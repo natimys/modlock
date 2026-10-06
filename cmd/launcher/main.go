@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -54,6 +55,11 @@ func run() int {
 	appVersion := updater.ActiveVersion()
 	fallbackAppPath := ""
 	if appVersion == "" {
+		if previous := updater.PreviousVersion(); previous != "" && updater.CheckPayload(previous) == nil {
+			appVersion = previous
+		}
+	}
+	if appVersion == "" {
 		appVersion = buildinfo.Version
 		launcherPath, pathErr := os.Executable()
 		if pathErr != nil {
@@ -83,78 +89,209 @@ func run() int {
 		}
 	}
 
-	for handoff := 0; handoff < 3; handoff++ {
-		appPath := fallbackAppPath
-		if updater.ActiveVersion() != "" {
-			fallbackAppPath = ""
-		}
-		if fallbackAppPath == "" {
-			appPath, err = updater.AppPath(appVersion)
+	return runPayloadLoop(appVersion, fallbackAppPath, os.Args[1:], controlDir, productionDeps())
+}
+
+type launcherDeps struct {
+	active, previous func() string
+	appPath          func(string) (string, error)
+	checkPayload     func(string) error
+	rollback         func(string) error
+	bundled          func() string
+	launch           func(path, data string, skipUpdate, handoff bool, args []string) (int, int)
+	stderr           *os.File
+}
+
+func productionDeps() launcherDeps {
+	return launcherDeps{updater.ActiveVersion, updater.PreviousVersion, updater.AppPath, updater.CheckPayload, updater.AutomaticRollback, bundledPayload, launchAndWait, os.Stderr}
+}
+
+func runPayloadLoop(version, bundled string, args []string, data string, d launcherDeps) int {
+	// Only failed startups are excluded from recovery. A healthy payload that
+	// exits with 75 can be resumed after the replacement fails to start.
+	tried := map[string]bool{}
+	updateHandoff := false
+	attempts, handoffs := 0, 0
+	for {
+		path := bundled
+		if path == "" {
+			if version == "" {
+				fmt.Fprintln(d.stderr, "ModLock: нет пригодной версии приложения.")
+				return 1
+			}
+			var err error
+			path, err = d.appPath(version)
 			if err != nil {
-				fmt.Fprintln(os.Stderr, err)
+				fmt.Fprintln(d.stderr, "ModLock:", err)
 				return 1
 			}
 		}
-		if _, err = os.Stat(appPath); err != nil {
-			fmt.Fprintln(os.Stderr, "ModLock version is missing:", appVersion)
-			return 1
+		abs, err := filepath.Abs(path)
+		if err != nil {
+			abs = filepath.Clean(path)
 		}
-		skipUpdateAction := handoff > 0 && len(os.Args) > 1 && os.Args[1] == "self-update"
-		code, exitCode := launchAndWait(appPath, controlDir, handoff > 0, skipUpdateAction)
-		if code != 75 && code != -2 {
-			return exitCode
-		}
-		if code == 75 {
-			appVersion = updater.ActiveVersion()
-			if appVersion == "" {
-				fmt.Fprintln(os.Stderr, "ModLock update did not set an active version")
-				return 1
-			}
-			continue
-		}
-		if code == -2 {
-			old := updater.PreviousVersion()
-			if old != "" && old != appVersion {
-				fmt.Fprintln(os.Stderr, "ModLock: новая версия не подтвердила запуск; восстановлена предыдущая.")
-				if err = updater.Rollback(); err != nil {
-					fmt.Fprintln(os.Stderr, "rollback:", err)
-					return 1
-				}
-				appVersion = old
+		if tried[abs] {
+			if current := d.active(); current != "" && !triedPath(d, current, tried) {
+				version, bundled = current, ""
 				continue
 			}
-			fmt.Fprintln(os.Stderr, "ModLock: приложение не подтвердило запуск за 10 секунд.")
+			previous := d.previous()
+			if previous != "" && !triedPath(d, previous, tried) && d.checkPayload(previous) == nil {
+				version, bundled = previous, ""
+				continue
+			}
+			if bundled == "" {
+				bundled = d.bundled()
+			}
+			if bundled != "" && !triedPath(d, bundled, tried) {
+				version = ""
+				continue
+			}
+			fmt.Fprintln(d.stderr, "ModLock: payload был испробован и не запускается:", path)
 			return 1
 		}
-		return code
+		attempts++
+		failedUpdateHandoff := false
+		if _, err = os.Stat(path); err != nil {
+			fmt.Fprintln(d.stderr, "ModLock: payload недоступен:", path, err)
+			if updateHandoff {
+				fmt.Fprintln(d.stderr, "ModLock: новая версия не запустилась; восстановлена предыдущая. Обновление не удалось.")
+				failedUpdateHandoff = true
+				updateHandoff = false
+			}
+		} else {
+			isSelfUpdate := len(args) > 0 && args[0] == "self-update"
+			code, exitCode := d.launch(path, data, attempts > 1, updateHandoff, args)
+			if code == -1 {
+				return exitCode
+			}
+			if code == 75 {
+				handoffs++
+				if handoffs > 4 {
+					fmt.Fprintln(d.stderr, "ModLock: слишком много переключений версии.")
+					return 1
+				}
+				updateHandoff = isSelfUpdate && !hasArg(args, "--check")
+				version = d.active()
+				bundled = ""
+				if version == "" {
+					fmt.Fprintln(d.stderr, "ModLock: переключение не выбрало активную версию.")
+					return 1
+				}
+				continue
+			}
+			if updateHandoff {
+				fmt.Fprintln(d.stderr, "ModLock: новая версия не запустилась; восстановлена предыдущая. Обновление не удалось.")
+				failedUpdateHandoff = true
+				updateHandoff = false
+			}
+		}
+
+		tried[abs] = true
+		// Startup failures share one recovery path. If another process changed
+		// the active pointer, adopt its choice and never roll it back from stale state.
+		if version != "" && d.active() == version {
+			if err := d.rollback(version); err == nil {
+				version = d.active()
+				if failedUpdateHandoff {
+					return 1
+				}
+				if version != "" {
+					bundled = ""
+					continue
+				}
+			} else {
+				current := d.active()
+				if current != "" && current != version && !triedPath(d, current, tried) {
+					version, bundled = current, ""
+					continue
+				}
+			}
+		} else if current := d.active(); current != "" && current != version && !triedPath(d, current, tried) {
+			version, bundled = current, ""
+			continue
+		}
+		previous := d.previous()
+		if previous != "" && previous != version && !triedPath(d, previous, tried) && d.checkPayload(previous) == nil {
+			version, bundled = previous, ""
+			continue
+		}
+		if bundled == "" {
+			bundled = d.bundled()
+		}
+		if bundled != "" && !triedPath(d, bundled, tried) {
+			version = ""
+			continue
+		}
+		fmt.Fprintln(d.stderr, "ModLock: ни один payload не удалось запустить.")
+		return 1
 	}
-	fmt.Fprintln(os.Stderr, "ModLock: too many update handoffs")
-	return 1
+}
+
+func triedPath(d launcherDeps, path string, tried map[string]bool) bool {
+	if versionPath, err := d.appPath(path); err == nil {
+		path = versionPath
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		abs = filepath.Clean(path)
+	}
+	return tried[abs]
+}
+
+func hasArg(args []string, want string) bool {
+	for _, arg := range args {
+		if arg == want {
+			return true
+		}
+	}
+	return false
+}
+
+func bundledPayload() string {
+	launcherPath, err := os.Executable()
+	if err != nil {
+		return ""
+	}
+	path := filepath.Join(filepath.Dir(launcherPath), "modlock-app.exe")
+	if _, err = os.Stat(path); err != nil {
+		return ""
+	}
+	checkCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if output, checkErr := exec.CommandContext(checkCtx, path, "--modlock-healthcheck").CombinedOutput(); checkErr != nil {
+		fmt.Fprintln(os.Stderr, "ModLock: комплектный payload не прошёл проверку:", strings.TrimSpace(string(output)))
+		return ""
+	}
+	return path
 }
 
 // launchAndWait returns code=-1 with exitCode set for a normal process exit,
 // code=75 when the app requested a version handoff, or code=-2 on readiness timeout.
-func launchAndWait(path, data string, skipUpdate, skipUpdateAction bool) (code, exitCode int) {
+var startupTimeout = 10 * time.Second
+
+func launchAndWait(path, data string, skipUpdate, handoffUpdate bool, args []string) (code, exitCode int) {
 	ready := filepath.Join(data, fmt.Sprintf("ready-%d-%d", os.Getpid(), time.Now().UnixNano()))
 	_ = os.Remove(ready)
-	cmd := exec.Command(path, os.Args[1:]...)
+	cmd := exec.Command(path, args...)
 	cmd.Dir, _ = os.Getwd()
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-	cmd.Env = filteredEnv(os.Environ(), "MODLOCK_LAUNCHER", "MODLOCK_SKIP_UPDATE", "MODLOCK_READY_FILE", "MODLOCK_HANDOFF_UPDATE")
-	cmd.Env = append(cmd.Env, "MODLOCK_LAUNCHER=1", "MODLOCK_READY_FILE="+ready)
+	launcherPath, _ := os.Executable()
+	cmd.Env = filteredEnv(os.Environ(), "MODLOCK_LAUNCHER", "MODLOCK_SKIP_UPDATE", "MODLOCK_READY_FILE", "MODLOCK_HANDOFF_UPDATE", "MODLOCK_LAUNCHER_DIR")
+	cmd.Env = append(cmd.Env, "MODLOCK_LAUNCHER=1", "MODLOCK_READY_FILE="+ready, "MODLOCK_LAUNCHER_DIR="+filepath.Dir(launcherPath))
 	if skipUpdate {
 		cmd.Env = append(cmd.Env, "MODLOCK_SKIP_UPDATE=1")
 	}
-	if skipUpdateAction {
+	if handoffUpdate {
 		cmd.Env = append(cmd.Env, "MODLOCK_HANDOFF_UPDATE=1")
 	}
 	if err := cmd.Start(); err != nil {
 		fmt.Fprintln(os.Stderr, "ModLock launcher:", err)
-		return -1, 1
+		return -3, 1
 	}
 	finished := make(chan error, 1)
 	go func() { finished <- cmd.Wait() }()
-	timer := time.NewTimer(10 * time.Second)
+	timer := time.NewTimer(startupTimeout)
 	defer timer.Stop()
 	for {
 		if _, err := os.Stat(ready); err == nil {
@@ -167,25 +304,39 @@ func launchAndWait(path, data string, skipUpdate, skipUpdateAction bool) (code, 
 				if e.ExitCode() == 75 {
 					return 75, -1
 				}
-				return e.ExitCode(), e.ExitCode()
+				return -1, e.ExitCode()
 			}
 			fmt.Fprintln(os.Stderr, "ModLock launcher:", waitErr)
 			return -1, 1
 		}
 		select {
 		case err := <-finished:
+			_, readyErr := os.Stat(ready)
 			_ = os.Remove(ready)
+			if readyErr == nil {
+				if err == nil {
+					return -1, 0
+				}
+				if e, ok := err.(*exec.ExitError); ok && e.ExitCode() == 75 {
+					return 75, -1
+				}
+				if e, ok := err.(*exec.ExitError); ok {
+					return -1, e.ExitCode()
+				}
+				fmt.Fprintln(os.Stderr, "ModLock launcher:", err)
+				return -1, 1
+			}
 			if err == nil {
-				return -1, 0
+				return -3, 0
 			}
 			if e, ok := err.(*exec.ExitError); ok {
 				if e.ExitCode() == 75 {
 					return 75, -1
 				}
-				return e.ExitCode(), e.ExitCode()
+				return -3, e.ExitCode()
 			}
 			fmt.Fprintln(os.Stderr, "ModLock launcher:", err)
-			return -1, 1
+			return -3, 1
 		case <-timer.C:
 			if _, err := os.Stat(ready); err == nil {
 				continue

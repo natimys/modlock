@@ -83,9 +83,15 @@ func readPointer(path string) string {
 	if json.Unmarshal(b, &p) != nil {
 		return ""
 	}
+	if e := validateVersionPath(p.Version); e != nil {
+		return ""
+	}
 	return p.Version
 }
 func writePointer(path, version string) error {
+	if err := validateVersionPath(version); err != nil {
+		return fmt.Errorf("invalid version pointer: %w", err)
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return err
 	}
@@ -95,11 +101,20 @@ func writePointer(path, version string) error {
 	if err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	if err = os.WriteFile(tmp, b, 0600); err != nil {
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".pointer-*.tmp")
+	if err != nil {
 		return err
 	}
-	return replaceFile(tmp, path)
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	if _, err = tmp.Write(b); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err = tmp.Close(); err != nil {
+		return err
+	}
+	return replaceFile(tmpPath, path)
 }
 
 func ActiveVersion() string   { p, _ := ActivePath(); return readPointer(p) }
@@ -113,6 +128,9 @@ func SetActiveVersion(version string) error {
 }
 
 func InitializeBootstrap(src, version string) error {
+	if err := validateVersionPath(version); err != nil {
+		return fmt.Errorf("invalid bootstrap version: %w", err)
+	}
 	if ActiveVersion() != "" {
 		return nil
 	}
@@ -173,11 +191,37 @@ func acquireUpdateLock(dir string) (func(), error) {
 	return func() { _ = os.Remove(lock) }, nil
 }
 func AppPath(version string) (string, error) {
+	if err := validateVersionPath(version); err != nil {
+		return "", fmt.Errorf("invalid application version: %w", err)
+	}
 	d, e := VersionsDir()
 	if e != nil {
 		return "", e
 	}
 	return filepath.Join(d, version, "modlock-app.exe"), nil
+}
+
+// CheckPayload verifies both the version path and that the executable can
+// complete its local health check before it is selected for rollback.
+var healthCheckPayload = checkPayload
+
+func CheckPayload(version string) error { return healthCheckPayload(version) }
+
+func checkPayload(version string) error {
+	path, err := AppPath(version)
+	if err != nil {
+		return err
+	}
+	if _, err = os.Stat(path); err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, path, "--modlock-healthcheck")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("version %s health check failed: %w: %s", version, err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 func AutomaticCheck(ctx context.Context) (bool, error) { return update(ctx, false, false) }
@@ -192,7 +236,7 @@ func update(ctx context.Context, force, checkOnly bool) (bool, error) {
 		}
 		return false, nil
 	}
-	if _, err := parseVersion(buildinfo.Version); err != nil {
+	if err := validateVersionPath(buildinfo.Version); err != nil {
 		return false, fmt.Errorf("invalid built-in version: %w", err)
 	}
 	cleanupInterrupted()
@@ -212,6 +256,11 @@ func update(ctx context.Context, force, checkOnly bool) (bool, error) {
 	if cmp <= 0 {
 		return false, nil
 	}
+	if force {
+		_ = os.Remove(rejectedPath())
+	} else if rejectedVersion() == manifest.Version {
+		return false, nil
+	}
 	if checkOnly {
 		return true, nil
 	}
@@ -220,6 +269,53 @@ func update(ctx context.Context, force, checkOnly bool) (bool, error) {
 		return false, err
 	}
 	return true, nil
+}
+
+func rejectedPath() string { d, _ := DataDir(); return filepath.Join(d, "rejected-version.json") }
+func rejectedVersion() string {
+	b, err := os.ReadFile(rejectedPath())
+	if err != nil {
+		return ""
+	}
+	var p struct {
+		Version string `json:"version"`
+	}
+	if json.Unmarshal(b, &p) != nil {
+		return ""
+	}
+	if err = validateVersionPath(p.Version); err != nil {
+		return ""
+	}
+	return p.Version
+}
+func rejectVersion(version string) error {
+	if err := validateVersionPath(version); err != nil {
+		return err
+	}
+	d, err := DataDir()
+	if err != nil {
+		return err
+	}
+	if err = os.MkdirAll(d, 0755); err != nil {
+		return err
+	}
+	b, _ := json.Marshal(struct {
+		Version string `json:"version"`
+	}{version})
+	tmp, err := os.CreateTemp(d, ".rejected-*.tmp")
+	if err != nil {
+		return err
+	}
+	p := tmp.Name()
+	defer os.Remove(p)
+	if _, err = tmp.Write(b); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err = tmp.Close(); err != nil {
+		return err
+	}
+	return replaceFile(p, rejectedPath())
 }
 
 func cleanupInterrupted() {
@@ -329,7 +425,7 @@ func fetchManifest(ctx context.Context) (Manifest, string, error) {
 	if m.Version != strings.TrimPrefix(rel.Tag, "v") {
 		return Manifest{}, "", errors.New("release tag and manifest version do not match")
 	}
-	if _, e = parseVersion(m.Version); e != nil {
+	if e = validateVersionPath(m.Version); e != nil {
 		return Manifest{}, "", e
 	}
 	if m.Protocol != protocol {
@@ -359,6 +455,9 @@ func fetchManifest(ctx context.Context) (Manifest, string, error) {
 }
 
 func install(ctx context.Context, m Manifest, url string) error {
+	if err := validateVersionPath(m.Version); err != nil {
+		return fmt.Errorf("invalid release version: %w", err)
+	}
 	dir, e := DataDir()
 	if e != nil {
 		return e
@@ -643,8 +742,11 @@ func Rollback() error {
 	if v == "" {
 		return errors.New("no previous application version is available")
 	}
-	if _, e = parseVersion(v); e != nil {
+	if e = validateVersionPath(v); e != nil {
 		return e
+	}
+	if e = CheckPayload(v); e != nil {
+		return fmt.Errorf("previous application is not usable: %w", e)
 	}
 	current := readPointer(active)
 	if e = writePointer(active, v); e != nil {
@@ -656,4 +758,46 @@ func Rollback() error {
 		}
 	}
 	return nil
+}
+
+// AutomaticRollback is used only after the newly selected version failed
+// startup. It validates the fallback before changing either pointer.
+func AutomaticRollback(failed string) error {
+	if err := validateVersionPath(failed); err != nil {
+		return err
+	}
+	dir, err := DataDir()
+	if err != nil {
+		return err
+	}
+	release, err := acquireUpdateLock(dir)
+	if err != nil {
+		return err
+	}
+	defer release()
+	active, err := ActivePath()
+	if err != nil {
+		return err
+	}
+	previous, err := PreviousPath()
+	if err != nil {
+		return err
+	}
+	if readPointer(active) != failed {
+		return errors.New("active version changed before rollback")
+	}
+	fallback := readPointer(previous)
+	if fallback == "" || fallback == failed {
+		return errors.New("no valid previous application version is available")
+	}
+	if err = CheckPayload(fallback); err != nil {
+		return fmt.Errorf("previous application is not usable: %w", err)
+	}
+	if err = rejectVersion(failed); err != nil {
+		return err
+	}
+	if err = writePointer(active, fallback); err != nil {
+		return err
+	}
+	return writePointer(previous, failed)
 }

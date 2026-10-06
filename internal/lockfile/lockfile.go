@@ -1,6 +1,7 @@
 package lockfile
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -8,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/BurntSushi/toml"
+	"modlock/internal/atomicfile"
 )
 
 const DefaultFilename = "mod.lock"
@@ -193,26 +195,11 @@ func Write(path string, f *File) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	out, err := os.Create(tmp)
-	if err != nil {
+	var out bytes.Buffer
+	if err := toml.NewEncoder(&out).Encode(f); err != nil {
 		return err
 	}
-	err = toml.NewEncoder(out).Encode(f)
-	closeErr := out.Close()
-	if err != nil {
-		os.Remove(tmp)
-		return err
-	}
-	if closeErr != nil {
-		os.Remove(tmp)
-		return closeErr
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		os.Remove(path)
-		return os.Rename(tmp, path)
-	}
-	return nil
+	return atomicfile.Write(path, out.Bytes(), 0644)
 }
 
 func ResolveWithin(root, rel string) (string, error) {
