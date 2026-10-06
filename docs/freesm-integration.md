@@ -11,9 +11,11 @@ The launcher and Go component remain separate repositories:
 - Submodule `libraries/libnbtplusplus`: `687e43031df0dc641984b4256bcca50d5b3f7de3`
 
 The unmodified launcher has built locally and in Windows x64 CI. Local CTest
-passed all 22 tests, and CI uploaded the baseline artifact. Creating an instance
-and reaching the Minecraft main menu still need a hands-on UI check in the test
-profile; application branding and Qt integration remain gated on that check.
+passed all 22 tests, CI uploaded the baseline artifact, and a hands-on check
+confirmed instance creation and Minecraft launch. The fork now has a separate
+Freesm ModLock application identity, data directory, and updater repository.
+An integrated MSVC x64 build also packages the pinned Go payload; its bridge
+smoke check passed with a root path containing spaces and Cyrillic characters.
 The Go baseline and current bridge pass `go test ./...`.
 
 The Go CLI now accepts an explicit `--root`, including empty instance directories,
@@ -42,7 +44,7 @@ malformed/oversized messages, and branch movement between preview and apply.
 Real loader/payload smoke checks passed with spaces and Cyrillic in the root.
 See [bridge-protocol.md](bridge-protocol.md). Qt is not connected yet.
 
-## Local Windows baseline
+## Local Windows builds
 
 `scripts/build-freesm-baseline.ps1` uses the existing `windows_msvc` preset,
 imports the MSVC x64 developer environment, builds, runs CTest, and installs
@@ -80,6 +82,12 @@ interpreter to PATH without changing system settings.
 The script also preserves `CMAKE_PROGRAM_PATH` in vcpkg's build environment so
 its Meson overlay selects the same Python interpreter.
 
+Once the launcher fork is checked out at `feature/modlock` with its submodules,
+`scripts/build-freesm-modlock.ps1` uses the `windows_msvc_modlock` preset to
+build and test the integrated launcher, run Go tests from the pinned submodule,
+and install the player package. It verifies the submodule checkout against the
+launcher gitlink before building.
+
 The fork's `ModLock Windows baseline` workflow runs on Windows 2022 with
 MSVC x64, Qt 6.10.2, and the existing dependency setup action. Its checkout
 is pinned to the unchanged upstream revision. The output is an upstream
@@ -102,9 +110,10 @@ Initial CI run: https://github.com/natimys/FreesmLauncher/actions/runs/375041282
 - Component changes create a new instance rather than migrating the existing one.
 - Author mode disables automatic local pack updates, uses installed Git
   credentials, and publishes only explicitly managed content.
-- Separate app/data identity and fork update source must precede distributing
-  an integrated build. Preserve existing licensing and upstream attribution.
+- Preserve existing licensing and upstream attribution in every release.
 
-Transactional schema 2 installation, the remaining bridge operations, Qt import/update pages, author editor,
-packaging a pinned Go payload with the launcher, and release acceptance checks
-are still pending implementation.
+The fork's `Freesm ModLock Windows x64` workflow builds the integrated launcher,
+tests Qt and Go, smoke-tests the bundled bridge, and uploads the player package.
+Transactional schema 2 installation, the remaining bridge operations, Qt
+import/update pages, author editor, and full release acceptance checks remain
+pending implementation.
