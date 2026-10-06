@@ -10,10 +10,11 @@ The launcher and Go component remain separate repositories:
 - Baseline upstream revision: `163424fc202e451f05ca360ef431209664691137`
 - Submodule `libraries/libnbtplusplus`: `687e43031df0dc641984b4256bcca50d5b3f7de3`
 
-The baseline gate precedes application branding and functional integration:
-build the unmodified launcher, run CTest, create a Minecraft instance, and
-verify that Minecraft launches. These runtime checks are not yet complete.
-The Go baseline passes `go test ./...`.
+The unmodified launcher has built locally and in Windows x64 CI. Local CTest
+passed all 22 tests, and CI uploaded the baseline artifact. Creating an instance
+and reaching the Minecraft main menu still need a hands-on UI check in the test
+profile; application branding and Qt integration remain gated on that check.
+The Go baseline and current bridge pass `go test ./...`.
 
 The Go CLI now accepts an explicit `--root`, including empty instance directories,
 while retaining automatic discovery for legacy calls. It is not yet connected to Qt.
@@ -26,8 +27,15 @@ returns the Git commit and diff; applying requires the full commit hash and chec
 out that exact object. A regression test advances the branch between preview and
 apply and verifies that the previewed JAR content is installed.
 
-Protocol-1 bridge now exposes `capabilities`, `read`, `check`, and `apply` for
-schema 1, with NDJSON progress, cancellation, and typed errors. The loader uses
+Lock parsing accepts schema 1 and schema 2. Schema 2 adds pack name/version,
+profile component IDs and versions, SHA-256 digests, and managed files with
+checked instance targets and `replace`/`if_missing` policies. Schema 2 is not
+advertised for player application until its transactional installer is ready.
+Author scan preferences have a separate `.modlock/author.toml` file for include
+directories, exclusions, and ignored mod IDs.
+
+Protocol-1 bridge exposes `capabilities`, `read`, `check`, `apply`, and
+`save-author-settings` for schema 1, with NDJSON progress, cancellation, and typed errors. The loader uses
 its verified adjacent payload for bridge calls, bypassing shared CLI updates.
 Tests cover fragmented JSON, progress, cancellation, incompatible protocol,
 malformed/oversized messages, and branch movement between preview and apply.
@@ -97,6 +105,6 @@ Initial CI run: https://github.com/natimys/FreesmLauncher/actions/runs/375041282
 - Separate app/data identity and fork update source must precede distributing
   an integrated build. Preserve existing licensing and upstream attribution.
 
-Schema 2, the remaining bridge operations, Qt import/update pages, author editor,
+Transactional schema 2 installation, the remaining bridge operations, Qt import/update pages, author editor,
 packaging a pinned Go payload with the launcher, and release acceptance checks
 are still pending implementation.

@@ -1,6 +1,8 @@
 package lockfile
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"testing"
@@ -18,6 +20,31 @@ func TestRoundTrip(t *testing.T) {
 	}
 	if len(got.Mods) != 1 || got.Mods[0].Filename != "a.jar" {
 		t.Fatalf("unexpected: %#v", got)
+	}
+}
+
+func TestSchema2RoundTripAndValidation(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "mod.lock")
+	hash := hex.EncodeToString(sha256.New().Sum(nil))
+	want := &File{
+		Schema: 2,
+		Pack:   Pack{Repository: "https://example.test/pack.git", Branch: "main", LockPath: "mod.lock", ModsDir: "mods", Name: "Example", Version: "1.2", Components: []Component{{ID: "net.minecraft", Version: "1.21.1"}, {ID: "fabric-loader", Version: "0.16.5"}}},
+		Mods:   []ModEntry{{ID: "modrinth:abc", Filename: "example.jar", Source: "modrinth", URL: "https://example.test/example.jar", SHA256: hash}},
+		Files:  []ManagedFile{{Path: "config/example.toml", Target: "config/example.toml", SHA256: hash, Policy: "replace"}, {Path: "scripts/start.ps1", Target: "scripts/start.ps1", SHA256: hash, Policy: "if_missing"}},
+	}
+	if err := Write(p, want); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Read(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Schema != 2 || got.Pack.Name != "Example" || len(got.Pack.Components) != 2 || len(got.Files) != 2 || got.Mods[0].SHA256 != hash {
+		t.Fatalf("unexpected schema 2 round trip: %#v", got)
+	}
+	got.Files[1].Target = "config/example.toml/child"
+	if err := got.Validate(); err == nil {
+		t.Fatal("expected overlapping destinations to be rejected")
 	}
 }
 func TestResolveWithinRejectsEscape(t *testing.T) {

@@ -7,10 +7,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"modlock/internal/authorconfig"
 	"modlock/internal/failure"
 )
 
@@ -21,6 +24,61 @@ func (f fragmented) Read(b []byte) (int, error) {
 		b = b[:2]
 	}
 	return f.Reader.Read(b)
+}
+
+func TestBridgeScansModsByContentHash(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "mods"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "mods", "пример.jar"), []byte("jar bytes"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	input := `{"type":"request","id":"scan","operation":"scan"}`
+	var output bytes.Buffer
+	if err := Run([]string{"--protocol", "1", "--root", root}, strings.NewReader(input), &output); err != nil {
+		t.Fatal(err)
+	}
+	got := events(t, output.Bytes())
+	if len(got) != 1 || got[0].Error != nil {
+		t.Fatalf("events: %#v", got)
+	}
+	var result struct {
+		Mods []struct {
+			Filename, SHA256 string
+			Size             int64
+		} `json:"mods"`
+	}
+	encoded, err := json.Marshal(got[0].Result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = json.Unmarshal(encoded, &result); err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Mods) != 1 || result.Mods[0].Filename != "пример.jar" || result.Mods[0].Size != int64(len("jar bytes")) || len(result.Mods[0].SHA256) != 64 {
+		t.Fatalf("scan result: %#v", result)
+	}
+}
+
+func TestBridgeSavesSeparateAuthorSettings(t *testing.T) {
+	root := t.TempDir()
+	input := `{"type":"request","id":"settings","operation":"save-author-settings","params":{"include_dirs":["config"],"exclude_paths":["saves/**"],"ignored_mod_ids":["modrinth:abc"]}}`
+	var output bytes.Buffer
+	if err := Run([]string{"--protocol", "1", "--root", root}, strings.NewReader(input), &output); err != nil {
+		t.Fatal(err)
+	}
+	got := events(t, output.Bytes())
+	if len(got) != 1 || got[0].Error != nil {
+		t.Fatalf("events: %#v", got)
+	}
+	settings, err := authorconfig.Read(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(settings.IncludeDirs) != 1 || len(settings.ExcludePaths) != 1 || len(settings.IgnoredModIDs) != 1 {
+		t.Fatalf("settings: %#v", settings)
+	}
 }
 
 func events(t *testing.T, output []byte) []Event {

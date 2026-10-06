@@ -8,9 +8,11 @@ import (
 	"io"
 
 	"modlock/internal/app"
+	"modlock/internal/authorconfig"
 	"modlock/internal/buildinfo"
 	"modlock/internal/failure"
 	"modlock/internal/lockfile"
+	"modlock/internal/scan"
 	syncer "modlock/internal/sync"
 )
 
@@ -34,7 +36,7 @@ func Run(args []string, input io.Reader, output io.Writer) error {
 	return Serve(context.Background(), input, output, func(ctx context.Context, request Request, progress func(string)) (any, error) {
 		switch request.Operation {
 		case "capabilities":
-			return map[string]any{"protocol": Protocol, "version": buildinfo.Version, "loader_protocol": buildinfo.LoaderProtocol, "schemas": []int{1}, "operations": []string{"capabilities", "read", "check", "apply"}, "cancel": true}, nil
+			return map[string]any{"protocol": Protocol, "version": buildinfo.Version, "loader_protocol": buildinfo.LoaderProtocol, "schemas": []int{1}, "operations": []string{"capabilities", "read", "check", "apply", "scan", "save-author-settings"}, "cancel": true}, nil
 		case "read":
 			var source lockfile.Pack
 			if err := decode(request.Params, &source); err != nil {
@@ -59,6 +61,21 @@ func Run(args []string, input io.Reader, output io.Writer) error {
 				return nil, failure.Wrap(failure.InvalidRequest, fmt.Errorf("previewed revision is required"))
 			}
 			return syncer.RunRevision(ctx, directory, params.Revision, progress)
+		case "save-author-settings":
+			var settings authorconfig.Config
+			if err := decode(request.Params, &settings); err != nil {
+				return nil, failure.Wrap(failure.InvalidRequest, err)
+			}
+			if err := authorconfig.Write(directory, &settings); err != nil {
+				return nil, err
+			}
+			return map[string]bool{"saved": true}, nil
+		case "scan":
+			mods, err := scan.Mods(directory)
+			if err != nil {
+				return nil, err
+			}
+			return map[string]any{"mods": mods}, nil
 		default:
 			return nil, failure.Wrap(failure.InvalidRequest, fmt.Errorf("unsupported operation %q", request.Operation))
 		}

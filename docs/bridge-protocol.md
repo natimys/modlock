@@ -1,7 +1,9 @@
 # ModLock bridge protocol 1
 
-This describes the currently implemented service. Schema 2, initial installation,
-scanning, and author operations are not implemented yet and are not advertised.
+This describes the currently implemented service. The lock parser accepts schema
+1 and schema 2, but the bridge advertises schema 1 until transactional schema 2
+application is implemented. Initial installation, full file-tree scanning, publication,
+and rollback are not implemented or advertised yet.
 
 Start the bundled loader with an argument array, without a shell:
 
@@ -25,7 +27,7 @@ newline is accepted at EOF. Diagnostics go to stderr.
 
 ```json
 {"type":"request","id":"request-1","operation":"capabilities"}
-{"protocol":1,"type":"result","id":"request-1","result":{"protocol":1,"version":"dev","loader_protocol":1,"schemas":[1],"operations":["capabilities","read","check","apply"],"cancel":true}}
+{"protocol":1,"type":"result","id":"request-1","result":{"protocol":1,"version":"dev","loader_protocol":1,"schemas":[1],"operations":["capabilities","read","check","apply","scan","save-author-settings"],"cancel":true}}
 ```
 
 Progress and the terminal event have the same request ID:
@@ -50,6 +52,12 @@ its final event is authoritative. Qt must not normally terminate or kill it.
 - `apply`: `params` contains the full 40-character `revision` returned by `check`.
   Fetches history and checks out that exact commit. A moved branch does not change
   the applied content. An unavailable commit fails instead of installing the tip.
+- `save-author-settings`: writes `include_dirs`, `exclude_paths`, and
+  `ignored_mod_ids` to `.modlock/author.toml`, separately from the published lock.
+- `scan`: returns the installed JAR inventory, SHA-256 and sizes. Existing lock
+  entries contribute their stable ID, version, and source. Unrecognized JARs
+  remain unidentified for the author to classify. Arbitrary file-tree inventory
+  and initial installation will arrive with the managed-file transaction.
 
 ```json
 {"type":"request","id":"read-1","operation":"read","params":{"repository":"https://github.com/example/pack.git","branch":"main","lock_path":"mod.lock"}}

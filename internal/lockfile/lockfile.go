@@ -2,6 +2,7 @@ package lockfile
 
 import (
 	"bytes"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -30,16 +31,34 @@ func FindPath(root string) (string, error) {
 }
 
 type File struct {
-	Schema int        `toml:"schema" json:"schema"`
-	Pack   Pack       `toml:"pack" json:"pack"`
-	Mods   []ModEntry `toml:"mods" json:"mods"`
+	Schema int           `toml:"schema" json:"schema"`
+	Pack   Pack          `toml:"pack" json:"pack"`
+	Mods   []ModEntry    `toml:"mods" json:"mods"`
+	Files  []ManagedFile `toml:"files,omitempty" json:"files,omitempty"`
 }
 
 type Pack struct {
-	Repository string `toml:"repository" json:"repository"`
-	Branch     string `toml:"branch" json:"branch"`
-	LockPath   string `toml:"lock_path" json:"lock_path"`
-	ModsDir    string `toml:"mods_dir" json:"mods_dir"`
+	Repository string      `toml:"repository" json:"repository"`
+	Branch     string      `toml:"branch" json:"branch"`
+	LockPath   string      `toml:"lock_path" json:"lock_path"`
+	ModsDir    string      `toml:"mods_dir" json:"mods_dir"`
+	Name       string      `toml:"name,omitempty" json:"name,omitempty"`
+	Version    string      `toml:"version,omitempty" json:"version,omitempty"`
+	Components []Component `toml:"components,omitempty" json:"components,omitempty"`
+}
+
+// Component identifies a game or loader version using profile IDs.
+type Component struct {
+	ID      string `toml:"id" json:"id"`
+	Version string `toml:"version" json:"version"`
+}
+
+// ManagedFile maps a repository path to an instance path.
+type ManagedFile struct {
+	Path   string `toml:"path" json:"path"`
+	Target string `toml:"target" json:"target"`
+	SHA256 string `toml:"sha256" json:"sha256"`
+	Policy string `toml:"policy" json:"policy"`
 }
 
 type ModEntry struct {
@@ -53,6 +72,7 @@ type ModEntry struct {
 	FileID    int64  `toml:"file_id,omitempty" json:"file_id,omitempty"`
 	URL       string `toml:"url,omitempty" json:"url,omitempty"`
 	Path      string `toml:"path,omitempty" json:"path,omitempty"`
+	SHA256    string `toml:"sha256,omitempty" json:"sha256,omitempty"`
 }
 
 // Identity returns a stable key for matching versions of the same mod.
@@ -137,7 +157,7 @@ func (f *File) Defaults() {
 }
 
 func (f *File) Validate() error {
-	if f.Schema != 1 {
+	if f.Schema != 1 && f.Schema != 2 {
 		return fmt.Errorf("unsupported lock schema %d", f.Schema)
 	}
 	if strings.TrimSpace(f.Pack.Repository) == "" {
@@ -149,14 +169,32 @@ func (f *File) Validate() error {
 	if err := safeRelative(f.Pack.ModsDir); err != nil {
 		return fmt.Errorf("invalid pack.mods_dir: %w", err)
 	}
+	if f.Schema == 2 {
+		if strings.TrimSpace(f.Pack.Name) == "" || strings.TrimSpace(f.Pack.Version) == "" {
+			return fmt.Errorf("schema 2 requires pack.name and pack.version")
+		}
+		componentIDs := map[string]bool{}
+		for i, c := range f.Pack.Components {
+			key := strings.ToLower(c.ID)
+			if strings.TrimSpace(c.ID) == "" || strings.TrimSpace(c.Version) == "" || componentIDs[key] {
+				return fmt.Errorf("components[%d]: id and version must be present and IDs unique", i)
+			}
+			componentIDs[key] = true
+		}
+	}
 	seen := map[string]bool{}
 	identities := map[string]bool{}
+	targets := map[string]bool{}
 	for i, m := range f.Mods {
 		if err := safeRelative(m.Filename); err != nil || strings.ContainsAny(m.Filename, "/\\") {
 			return fmt.Errorf("mods[%d]: invalid filename", i)
 		}
 		if m.Filename == "" || filepath.Base(m.Filename) != m.Filename || strings.ToLower(filepath.Ext(m.Filename)) != ".jar" {
 			return fmt.Errorf("mods[%d]: invalid filename", i)
+		}
+		targets[strings.ToLower(filepath.ToSlash(filepath.Join(f.Pack.ModsDir, m.Filename)))] = true
+		if f.Schema == 2 && !validSHA256(m.SHA256) {
+			return fmt.Errorf("mods[%d] %s: schema 2 requires a SHA-256 digest", i, m.Filename)
 		}
 		if seen[strings.ToLower(m.Filename)] {
 			return fmt.Errorf("mods[%d]: duplicate filename %q", i, m.Filename)
@@ -179,7 +217,42 @@ func (f *File) Validate() error {
 			return fmt.Errorf("mods[%d] %s: unknown source %q", i, m.Filename, m.Source)
 		}
 	}
+	for i, managed := range f.Files {
+		if f.Schema != 2 {
+			return fmt.Errorf("files[%d]: managed files require schema 2", i)
+		}
+		if err := safeRelative(managed.Path); err != nil {
+			return fmt.Errorf("files[%d]: invalid repository path: %w", i, err)
+		}
+		if err := safeRelative(managed.Target); err != nil {
+			return fmt.Errorf("files[%d]: invalid destination: %w", i, err)
+		}
+		if !validSHA256(managed.SHA256) {
+			return fmt.Errorf("files[%d]: SHA-256 digest is required", i)
+		}
+		if managed.Policy != "replace" && managed.Policy != "if_missing" {
+			return fmt.Errorf("files[%d]: policy must be replace or if_missing", i)
+		}
+		target := strings.ToLower(filepath.ToSlash(filepath.Clean(filepath.FromSlash(managed.Target))))
+		if targets[target] {
+			return fmt.Errorf("files[%d]: destination overlaps another managed file", i)
+		}
+		for existing := range targets {
+			if strings.HasPrefix(existing, target+"/") || strings.HasPrefix(target, existing+"/") {
+				return fmt.Errorf("files[%d]: destination overlaps another managed path", i)
+			}
+		}
+		targets[target] = true
+	}
 	return nil
+}
+
+func validSHA256(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	_, err := hex.DecodeString(s)
+	return err == nil
 }
 
 func safeRelative(p string) error {
@@ -210,6 +283,10 @@ func safeRelative(p string) error {
 	}
 	return nil
 }
+
+// ValidateRelative checks an untrusted instance-relative path using the same
+// Windows-safe rules used by lock entries and filesystem operations.
+func ValidateRelative(p string) error { return safeRelative(p) }
 
 func Write(path string, f *File) error {
 	f.Defaults()
