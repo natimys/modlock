@@ -74,13 +74,21 @@ func Run(args []string, input io.Reader, output io.Writer) error {
 			if err := syncer.ValidateInstallSchema(nil, snapshot.Lock); err != nil {
 				return nil, err
 			}
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			// Seed the temporary instance with the exact previewed manifest. RunRevision
 			// then performs the regular transactional install from that same commit.
 			bootstrap := filepath.Join(directory, lockfile.DefaultFilename)
 			if err := lockfile.Write(bootstrap, snapshot.Lock); err != nil {
 				return nil, err
 			}
-			return syncer.RunRevision(ctx, directory, params.Revision, progress)
+			result, err := syncer.RunRevision(ctx, directory, params.Revision, progress)
+			if err != nil {
+				_ = os.Remove(bootstrap)
+				return nil, err
+			}
+			return result, nil
 		case "check":
 			return syncer.Check(ctx, directory, progress)
 		case "apply":
