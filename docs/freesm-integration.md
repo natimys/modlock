@@ -42,7 +42,14 @@ its verified adjacent payload for bridge calls, bypassing shared CLI updates.
 Tests cover fragmented JSON, progress, cancellation, incompatible protocol,
 malformed/oversized messages, and branch movement between preview and apply.
 Real loader/payload smoke checks passed with spaces and Cyrillic in the root.
-See [bridge-protocol.md](bridge-protocol.md). Qt is not connected yet.
+The launcher now has an asynchronous `QProcess` adapter that passes an argument
+array, parses fragmented NDJSON, preserves structured error codes, keeps stderr
+separate, and sends cooperative cancellation. Startup checks bridge and loader
+protocol compatibility and offers the fork's releases page on mismatch. Six Qt
+tests cover compatibility, incompatible payloads, fragmented progress/results,
+structured errors, cancellation, and CRLF stderr handling. See
+[bridge-protocol.md](bridge-protocol.md). Import and update pages are not wired
+to these operations yet.
 
 ## Local Windows builds
 
@@ -114,6 +121,7 @@ Initial CI run: https://github.com/natimys/FreesmLauncher/actions/runs/375041282
 
 The fork's `Freesm ModLock Windows x64` workflow builds the integrated launcher,
 tests Qt and Go, smoke-tests the bundled bridge, and uploads the player package.
+Initial run passed: https://github.com/natimys/FreesmLauncher/actions/runs/37516540359
 Transactional schema 2 installation, the remaining bridge operations, Qt
 import/update pages, author editor, and full release acceptance checks remain
 pending implementation.
