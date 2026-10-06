@@ -1,0 +1,47 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  windows-x64:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Validate tag
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF_NAME -notmatch '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$') { throw "Release tag must be vX.Y.Z" }
+      - name: Test
+        run: go test ./...
+      - name: Build and package
+        shell: pwsh
+        run: |
+          $version = $env:GITHUB_REF_NAME.TrimStart('v')
+          $commit = git rev-parse --short=12 HEAD
+          $date = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+          $repo = $env:GITHUB_REPOSITORY
+          $ld = "-X modlock/internal/buildinfo.Version=$version -X modlock/internal/buildinfo.Commit=$commit -X modlock/internal/buildinfo.Date=$date -X modlock/internal/buildinfo.ReleaseRepo=$repo"
+          New-Item -ItemType Directory -Force dist | Out-Null
+          $env:GOOS = 'windows'; $env:GOARCH = 'amd64'; $env:CGO_ENABLED = '0'
+          go build -trimpath -ldflags $ld -o dist/modlock-app.exe ./cmd/modlock
+          go build -trimpath -ldflags $ld -o dist/modlock.exe ./cmd/launcher
+          Compress-Archive -Path dist/modlock-app.exe -DestinationPath dist/modlock-app-windows-amd64.zip
+          Compress-Archive -Path dist/modlock.exe,dist/modlock-app.exe -DestinationPath dist/modlock-windows-amd64.zip
+          $archive = Get-Item dist/modlock-app-windows-amd64.zip
+          $hash = (Get-FileHash $archive.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          @{ version=$version; platform='windows-amd64'; archive=$archive.Name; size=$archive.Length; sha256=$hash; protocol=1 } | ConvertTo-Json -Compress | Set-Content -Encoding utf8 dist/manifest.json
+      - name: Publish stable release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: gh release create $env:GITHUB_REF_NAME dist/modlock-windows-amd64.zip dist/modlock-app-windows-amd64.zip dist/manifest.json --title $env:GITHUB_REF_NAME --generate-notes
