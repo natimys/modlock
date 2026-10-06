@@ -23,7 +23,14 @@ import (
 
 var newDetector = providers.New
 
+// ExplicitRootEnv is private process configuration supplied by the CLI. It is
+// never persisted in the lock or in the user's environment.
+const ExplicitRootEnv = "MODLOCK_INSTANCE_ROOT"
+
 func FindRoot(requireLock bool) (string, error) {
+	if root := os.Getenv(ExplicitRootEnv); root != "" {
+		return ValidateRoot(root)
+	}
 	cwd, _ := os.Getwd()
 	if _, e := lockfile.FindPath(cwd); e == nil {
 		return cwd, nil
@@ -52,6 +59,26 @@ func FindRoot(requireLock bool) (string, error) {
 		}
 	}
 	return "", errors.New("mod.lock not found; put it in the instance root or run modlock init")
+}
+
+// ValidateRoot accepts an existing, possibly empty Minecraft directory. An
+// explicit root must never silently fall back to a different instance.
+func ValidateRoot(root string) (string, error) {
+	if strings.TrimSpace(root) == "" {
+		return "", errors.New("--root requires a directory")
+	}
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		return "", fmt.Errorf("resolve --root: %w", err)
+	}
+	st, err := os.Stat(abs)
+	if err != nil {
+		return "", fmt.Errorf("open --root: %w", err)
+	}
+	if !st.IsDir() {
+		return "", errors.New("--root must be a directory")
+	}
+	return abs, nil
 }
 
 func readProjectLock(root string) (*lockfile.File, string, error) {

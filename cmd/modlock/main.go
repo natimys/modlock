@@ -26,6 +26,18 @@ func main() {
 			os.Exit(1)
 		}
 	}
+	args, root, argErr := splitRoot(os.Args[1:])
+	if argErr == nil && root != "" {
+		root, argErr = app.ValidateRoot(root)
+		if argErr == nil {
+			argErr = os.Setenv(app.ExplicitRootEnv, root)
+		}
+	}
+	if argErr != nil {
+		fmt.Fprintln(os.Stderr, "Error:", argErr)
+		os.Exit(2)
+	}
+	os.Args = append([]string{os.Args[0]}, args...)
 	manualUpdateCommand := len(os.Args) > 1 && os.Args[1] == "self-update"
 	if os.Getenv("MODLOCK_SKIP_UPDATE") == "" && !manualUpdateCommand {
 		if updated, updateErr := updater.AutomaticCheck(ctx); updateErr != nil {
@@ -101,7 +113,7 @@ func main() {
 				}
 			}
 		default:
-			fmt.Fprintln(os.Stderr, "Usage: modlock [sync|diff|push|init|add|ignore|revert|version|self-update]")
+			fmt.Fprintln(os.Stderr, "Usage: modlock [--root directory] [sync|diff|push|init|add|ignore|revert|version|self-update]")
 			os.Exit(2)
 		}
 	}

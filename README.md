@@ -36,6 +36,17 @@ go build -o modlock.exe ./cmd/launcher
 
 The command-line equivalent is `modlock sync`.
 
+When the instance directory is supplied by a launcher, pass it explicitly:
+
+```powershell
+modlock --root "D:\Minecraft\Сборка с пробелами\minecraft" sync
+```
+
+`--root` also works after the operation name. It must point to an existing
+directory and takes precedence over automatic discovery, even when the directory
+has no lock yet. An invalid explicit directory is an error; ModLock does not fall
+back to another instance. CLI calls without this option retain automatic discovery.
+
 ## Author workflow
 
 For an existing pack, run `modlock init`, enter the public repository URL, and confirm the generated lock. Unknown/custom jars are copied to `files/mods/` automatically.
