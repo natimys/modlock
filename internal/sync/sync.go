@@ -43,8 +43,9 @@ func RunRevision(ctx context.Context, root, revision string, progress Progress) 
 }
 
 type ConfirmedConflict struct {
-	Target string `json:"target"`
-	SHA256 string `json:"sha256"`
+	Target   string `json:"target"`
+	TargetID string `json:"target_id,omitempty"`
+	SHA256   string `json:"sha256"`
 }
 
 type targetState struct {
@@ -142,13 +143,21 @@ func snapshotModTargets(modsDir string, names []string) (map[string]targetState,
 }
 
 func RunRevisionConfirmed(ctx context.Context, root, revision string, progress Progress, confirmed []ConfirmedConflict) (Result, error) {
+	return RunRevisionConfirmedWithRoots(ctx, root, revision, progress, confirmed, nil)
+}
+
+func RunRevisionConfirmedWithRoots(ctx context.Context, root, revision string, progress Progress, confirmed []ConfirmedConflict, roots TargetRoots) (Result, error) {
 	if revision == "" {
 		return Result{}, fmt.Errorf("apply requires the previewed Git commit")
 	}
-	return run(ctx, root, revision, progress, confirmed)
+	return runWithRoots(ctx, root, revision, progress, confirmed, roots)
 }
 
 func run(ctx context.Context, root, revision string, progress Progress, confirmed []ConfirmedConflict) (Result, error) {
+	return runWithRoots(ctx, root, revision, progress, confirmed, nil)
+}
+
+func runWithRoots(ctx context.Context, root, revision string, progress Progress, confirmed []ConfirmedConflict, roots TargetRoots) (Result, error) {
 	if progress == nil {
 		progress = func(string) {}
 	}
@@ -178,6 +187,12 @@ func run(ctx context.Context, root, revision string, progress Progress, confirme
 	if err := requireSupportedInstallSchema(old, next); err != nil {
 		return Result{}, err
 	}
+	if old.Schema == 3 && next.Schema < 3 {
+		return Result{}, failure.Wrap(failure.UnsupportedFormat, fmt.Errorf("schema 3 cannot be downgraded to schema %d during sync", next.Schema))
+	}
+	if next.Schema == 3 {
+		return runSchema3(ctx, root, oldPath, old, next, repoDir, remoteLock, snapshot.Revision, roots, progress, confirmed)
+	}
 	if filepath.Clean(filepath.FromSlash(next.Pack.ModsDir)) != filepath.Clean(filepath.FromSlash(old.Pack.ModsDir)) {
 		return Result{}, fmt.Errorf("unsupported migration: remote pack.mods_dir changed from %q to %q", old.Pack.ModsDir, next.Pack.ModsDir)
 	}
@@ -195,8 +210,8 @@ func run(ctx context.Context, root, revision string, progress Progress, confirme
 		confirmedByTarget[strings.ToLower(filepath.ToSlash(c.Target))] = strings.ToLower(c.SHA256)
 	}
 	for _, c := range conflicts {
-		if c.Reason != "existing file would be replaced" && c.Reason != "locally modified managed file" {
-			return Result{}, failure.WrapDetails(failure.Conflict, fmt.Errorf("%s: %s", c.Target, c.Reason), map[string]any{"conflicts": conflicts})
+		if c.Kind != "existing_unmanaged" && c.Kind != "locally_modified" {
+			return Result{}, failure.WrapDetails(failure.Conflict, fmt.Errorf("%s: %s", c.Target, c.Message), map[string]any{"conflicts": conflicts})
 		}
 		if confirmedByTarget[strings.ToLower(filepath.ToSlash(c.Target))] != strings.ToLower(c.SHA256) {
 			return Result{}, failure.WrapDetails(failure.Conflict, fmt.Errorf("managed file conflict at %s (sha256 %s)", c.Target, c.SHA256), map[string]any{"conflicts": conflicts})
@@ -291,7 +306,7 @@ func run(ctx context.Context, root, revision string, progress Progress, confirme
 	for _, state := range modBefore {
 		if state.exists && !state.regular {
 			target := filepath.ToSlash(filepath.Join(old.Pack.ModsDir, state.name))
-			conflict := FileConflict{Target: target, Reason: "mod target is not a regular file"}
+			conflict := fileConflict("", target, "target_not_regular", "mod target is not a regular file", "")
 			return Result{}, failure.WrapDetails(failure.Conflict, fmt.Errorf("mod target %s is not a regular file", target), map[string]any{"conflicts": []FileConflict{conflict}})
 		}
 	}
@@ -382,7 +397,7 @@ func run(ctx context.Context, root, revision string, progress Progress, confirme
 			return Result{}, statErr
 		}
 		if exists && !info.Mode().IsRegular() {
-			return Result{}, failure.WrapDetails(failure.Conflict, fmt.Errorf("managed target %s is not a regular file", target), map[string]any{"conflicts": []FileConflict{{Target: target, Reason: "target is not a regular file"}}})
+			return Result{}, failure.WrapDetails(failure.Conflict, fmt.Errorf("managed target %s is not a regular file", target), map[string]any{"conflicts": []FileConflict{fileConflict("", target, "target_not_regular", "target is not a regular file", "")}})
 		}
 		oldFile, hadOld := oldManaged[key]
 		newFile, hasNew := nextManaged[key]
@@ -413,7 +428,11 @@ func run(ctx context.Context, root, revision string, progress Progress, confirme
 				continue
 			}
 			if (!hadOld || oldFile.Policy == "if_missing" || (oldFile.Policy == "replace" && !strings.EqualFold(digest, oldFile.SHA256))) && confirmedByTarget[key] != strings.ToLower(digest) {
-				conflict := FileConflict{Target: target, SHA256: digest, Reason: "existing file would be replaced"}
+				kind := "existing_unmanaged"
+				if hadOld && oldFile.Policy == "replace" {
+					kind = "locally_modified"
+				}
+				conflict := fileConflict("", target, kind, "existing file would be replaced", digest)
 				return Result{}, failure.WrapDetails(failure.Conflict, fmt.Errorf("managed file conflict at %s (sha256 %s)", target, digest), map[string]any{"conflicts": []FileConflict{conflict}})
 			}
 		}
@@ -545,7 +564,7 @@ func run(ctx context.Context, root, revision string, progress Progress, confirme
 			return Result{}, inspectErr
 		}
 		state := managedAfter[changed]
-		latestConflicts = append(latestConflicts, FileConflict{Target: filepath.ToSlash(changed), SHA256: state.sha256, Reason: "target changed during preparation"})
+		latestConflicts = append(latestConflicts, fileConflict("", filepath.ToSlash(changed), "changed_during_apply", "target changed during preparation", state.sha256))
 		sort.Slice(latestConflicts, func(i, j int) bool { return latestConflicts[i].Target < latestConflicts[j].Target })
 		return Result{}, failure.WrapDetails(failure.Conflict, fmt.Errorf("managed file changed during preparation: %s", changed), map[string]any{"conflicts": latestConflicts})
 	}
@@ -559,7 +578,7 @@ func run(ctx context.Context, root, revision string, progress Progress, confirme
 		if !state.exists {
 			target = filepath.ToSlash(filepath.Join(old.Pack.ModsDir, filepath.Base(changed)))
 		}
-		conflict := FileConflict{Target: target, SHA256: state.sha256, Reason: "mod target changed during preparation"}
+		conflict := fileConflict("", target, "changed_during_apply", "mod target changed during preparation", state.sha256)
 		return Result{}, failure.WrapDetails(failure.Conflict, fmt.Errorf("mod target changed during preparation: %s", target), map[string]any{"conflicts": []FileConflict{conflict}})
 	}
 	for _, conflict := range conflicts {
@@ -671,7 +690,7 @@ func requireSupportedInstallSchema(local, remote *lockfile.File) error {
 		if file == nil {
 			continue
 		}
-		if file.Schema != 1 && file.Schema != 2 {
+		if file.Schema != 1 && file.Schema != 2 && file.Schema != 3 {
 			return failure.Wrap(failure.UnsupportedFormat, fmt.Errorf("unsupported schema %d", file.Schema))
 		}
 	}

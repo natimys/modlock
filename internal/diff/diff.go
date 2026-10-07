@@ -3,6 +3,7 @@ package diff
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -36,7 +37,7 @@ func Locks(old, next *lockfile.File) Result {
 			r.Added = append(r.Added, n.Filename)
 			continue
 		}
-		if o.Filename != n.Filename || o.DisplayVersion() != n.DisplayVersion() || o.URL != n.URL || o.Path != n.Path {
+		if o.Filename != n.Filename || o.DisplayVersion() != n.DisplayVersion() || o.URL != n.URL || o.Path != n.Path || !equalTargets(o.Targets, n.Targets) {
 			r.Updated = append(r.Updated, Update{Old: o, New: n})
 		} else {
 			r.Unchanged++
@@ -51,6 +52,21 @@ func Locks(old, next *lockfile.File) Result {
 	sort.Strings(r.Removed)
 	sort.Slice(r.Updated, func(i, j int) bool { return r.Updated[i].New.Identity() < r.Updated[j].New.Identity() })
 	return r
+}
+
+func equalTargets(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	left, right := slices.Clone(a), slices.Clone(b)
+	sort.Strings(left)
+	sort.Strings(right)
+	for i := range left {
+		if left[i] != right[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func Local(modsDir string, lock *lockfile.File) (Result, error) {

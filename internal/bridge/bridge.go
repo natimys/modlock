@@ -38,7 +38,7 @@ func Run(args []string, input io.Reader, output io.Writer) error {
 	return Serve(context.Background(), input, output, func(ctx context.Context, request Request, progress func(string)) (any, error) {
 		switch request.Operation {
 		case "capabilities":
-			return map[string]any{"protocol": Protocol, "version": buildinfo.Version, "loader_protocol": buildinfo.LoaderProtocol, "schemas": []int{1, 2}, "operations": []string{"capabilities", "read", "install", "verify", "check", "apply", "scan", "save-author-settings"}, "cancel": true}, nil
+			return map[string]any{"protocol": Protocol, "version": buildinfo.Version, "loader_protocol": buildinfo.LoaderProtocol, "schemas": []int{1, 2, 3}, "operations": []string{"capabilities", "read", "install", "verify", "check", "apply", "scan", "save-author-settings"}, "cancel": true}, nil
 		case "read":
 			var source lockfile.Pack
 			if err := decode(request.Params, &source); err != nil {
@@ -54,6 +54,7 @@ func Run(args []string, input io.Reader, output io.Writer) error {
 			var params struct {
 				Pack               lockfile.Pack              `json:"pack"`
 				Revision           string                     `json:"revision"`
+				TargetRoots        syncer.TargetRoots         `json:"target_roots,omitempty"`
 				ConfirmedConflicts []syncer.ConfirmedConflict `json:"confirmed_conflicts,omitempty"`
 			}
 			if err := decode(request.Params, &params); err != nil {
@@ -75,6 +76,9 @@ func Run(args []string, input io.Reader, output io.Writer) error {
 			if err := syncer.ValidateInstallSchema(nil, snapshot.Lock); err != nil {
 				return nil, err
 			}
+			if err := syncer.ValidateTargetRoots(directory, snapshot.Lock, params.TargetRoots); err != nil {
+				return nil, err
+			}
 			if err := ctx.Err(); err != nil {
 				return nil, err
 			}
@@ -85,19 +89,36 @@ func Run(args []string, input io.Reader, output io.Writer) error {
 			if err := lockfile.Write(bootstrap, bootstrapLock); err != nil {
 				return nil, err
 			}
-			result, err := syncer.RunRevisionConfirmed(ctx, directory, params.Revision, progress, params.ConfirmedConflicts)
+			result, err := syncer.RunRevisionConfirmedWithRoots(ctx, directory, params.Revision, progress, params.ConfirmedConflicts, params.TargetRoots)
 			if err != nil {
 				_ = os.Remove(bootstrap)
 				return nil, err
 			}
 			return result, nil
 		case "check":
-			return syncer.Check(ctx, directory, progress)
+			var params struct {
+				TargetRoots syncer.TargetRoots `json:"target_roots,omitempty"`
+			}
+			if len(request.Params) != 0 && string(request.Params) != "null" {
+				if err := decode(request.Params, &params); err != nil {
+					return nil, failure.Wrap(failure.InvalidRequest, err)
+				}
+			}
+			return syncer.CheckWithRoots(ctx, directory, params.TargetRoots, progress)
 		case "verify":
-			return syncer.Verify(directory)
+			var params struct {
+				TargetRoots syncer.TargetRoots `json:"target_roots,omitempty"`
+			}
+			if len(request.Params) != 0 && string(request.Params) != "null" {
+				if err := decode(request.Params, &params); err != nil {
+					return nil, failure.Wrap(failure.InvalidRequest, err)
+				}
+			}
+			return syncer.VerifyWithRoots(directory, params.TargetRoots)
 		case "apply":
 			var params struct {
 				Revision           string                     `json:"revision"`
+				TargetRoots        syncer.TargetRoots         `json:"target_roots,omitempty"`
 				ConfirmedConflicts []syncer.ConfirmedConflict `json:"confirmed_conflicts,omitempty"`
 			}
 			if err := decode(request.Params, &params); err != nil {
@@ -106,7 +127,7 @@ func Run(args []string, input io.Reader, output io.Writer) error {
 			if params.Revision == "" {
 				return nil, failure.Wrap(failure.InvalidRequest, fmt.Errorf("previewed revision is required"))
 			}
-			return syncer.RunRevisionConfirmed(ctx, directory, params.Revision, progress, params.ConfirmedConflicts)
+			return syncer.RunRevisionConfirmedWithRoots(ctx, directory, params.Revision, progress, params.ConfirmedConflicts, params.TargetRoots)
 		case "save-author-settings":
 			var settings authorconfig.Config
 			if err := decode(request.Params, &settings); err != nil {
@@ -117,6 +138,32 @@ func Run(args []string, input io.Reader, output io.Writer) error {
 			}
 			return map[string]bool{"saved": true}, nil
 		case "scan":
+			var params struct {
+				TargetRoots syncer.TargetRoots `json:"target_roots,omitempty"`
+			}
+			if len(request.Params) != 0 && string(request.Params) != "null" {
+				if err := decode(request.Params, &params); err != nil {
+					return nil, failure.Wrap(failure.InvalidRequest, err)
+				}
+			}
+			if lockPath, lockErr := lockfile.FindPath(directory); lockErr == nil {
+				manifest, readErr := lockfile.Read(lockPath)
+				if readErr != nil {
+					return nil, readErr
+				}
+				if manifest.Schema == 3 {
+					if err := syncer.ValidateTargetRoots(directory, manifest, params.TargetRoots); err != nil {
+						return nil, err
+					}
+					mods, err := scan.ModsForTargets(manifest, params.TargetRoots)
+					if err != nil {
+						return nil, err
+					}
+					return map[string]any{"mods": mods}, nil
+				}
+			} else if !os.IsNotExist(lockErr) {
+				return nil, lockErr
+			}
 			mods, err := scan.Mods(directory)
 			if err != nil {
 				return nil, err

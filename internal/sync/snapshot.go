@@ -113,33 +113,51 @@ type Preview struct {
 }
 
 type ManagedChange struct {
-	Target string `json:"target"`
-	Action string `json:"action"`
-	Policy string `json:"policy"`
+	Target   string `json:"target"`
+	TargetID string `json:"target_id,omitempty"`
+	Action   string `json:"action"`
+	Policy   string `json:"policy"`
 }
 
 type FileConflict struct {
-	Target string `json:"target"`
-	SHA256 string `json:"sha256"`
-	Reason string `json:"reason"`
+	Target   string `json:"target"`
+	TargetID string `json:"target_id,omitempty"`
+	Kind     string `json:"kind"`
+	SHA256   string `json:"sha256"`
+	Message  string `json:"message"`
+	Reason   string `json:"reason,omitempty"`
+}
+
+type ModCheck struct {
+	Identity       string `json:"identity"`
+	TargetID       string `json:"target_id,omitempty"`
+	Filename       string `json:"filename"`
+	State          string `json:"state"`
+	ExpectedSHA256 string `json:"expected_sha256,omitempty"`
+	ActualSHA256   string `json:"actual_sha256,omitempty"`
 }
 
 // LocalCheck describes only files managed by the selected lock. Files without
 // a digest are checked for presence, regular-file type, and non-empty contents,
 // but cannot be claimed as content-verified.
 type LocalCheck struct {
-	State            string   `json:"state"`
-	NeedsRecovery    bool     `json:"needs_recovery"`
-	Missing          []string `json:"missing"`
-	Damaged          []string `json:"damaged"`
-	Unverified       []string `json:"unverified,omitempty"`
-	ManagedMissing   []string `json:"managed_missing,omitempty"`
-	ManagedChanged   []string `json:"managed_changed,omitempty"`
-	ManagedConflicts []string `json:"managed_conflicts,omitempty"`
+	State            string     `json:"state"`
+	NeedsRecovery    bool       `json:"needs_recovery"`
+	Missing          []string   `json:"missing"`
+	Damaged          []string   `json:"damaged"`
+	Unverified       []string   `json:"unverified,omitempty"`
+	ManagedMissing   []string   `json:"managed_missing,omitempty"`
+	ManagedChanged   []string   `json:"managed_changed,omitempty"`
+	ManagedConflicts []string   `json:"managed_conflicts,omitempty"`
+	ModStates        []ModCheck `json:"mod_states,omitempty"`
 }
 
 // Check does not install anything. Its commit can be supplied to RunRevision.
 func Check(ctx context.Context, root string, progress Progress) (Preview, error) {
+	return CheckWithRoots(ctx, root, nil, progress)
+}
+
+func CheckWithRoots(ctx context.Context, root string, roots TargetRoots, progress Progress) (Preview, error) {
 	release, err := acquireSyncLock(root)
 	if err != nil {
 		return Preview{}, err
@@ -161,7 +179,10 @@ func Check(ctx context.Context, root string, progress Progress) (Preview, error)
 	if err := requireSupportedInstallSchema(old, snapshot.Lock); err != nil {
 		return Preview{}, err
 	}
-	local, err := VerifyLock(root, snapshot.Lock)
+	if err := ValidateTargetRoots(root, snapshot.Lock, roots); err != nil {
+		return Preview{}, err
+	}
+	local, err := VerifyLockWithRoots(root, snapshot.Lock, roots)
 	if err != nil {
 		return Preview{}, err
 	}
@@ -196,7 +217,7 @@ func Check(ctx context.Context, root string, progress Progress) (Preview, error)
 	}
 	sort.Strings(result.Added)
 	result.Unchanged = len(snapshot.Lock.Mods) - len(result.Added) - len(result.Updated)
-	managed, conflicts, err := inspectManagedFiles(root, old, snapshot.Lock)
+	managed, conflicts, err := inspectManagedFilesWithRoots(root, old, snapshot.Lock, roots)
 	if err != nil {
 		return Preview{}, err
 	}
@@ -205,73 +226,102 @@ func Check(ctx context.Context, root string, progress Progress) (Preview, error)
 
 // VerifyLock checks local managed mod files without contacting the network.
 func VerifyLock(root string, lock *lockfile.File) (LocalCheck, error) {
-	modsDir, err := lockfile.ResolveWithin(root, lock.Pack.ModsDir)
-	if err != nil {
+	return VerifyLockWithRoots(root, lock, nil)
+}
+
+func VerifyLockWithRoots(root string, lock *lockfile.File, roots TargetRoots) (LocalCheck, error) {
+	if err := ValidateTargetRoots(root, lock, roots); err != nil {
 		return LocalCheck{}, err
 	}
 	result := LocalCheck{State: "healthy", Missing: []string{}, Damaged: []string{}, Unverified: []string{}, ManagedMissing: []string{}, ManagedChanged: []string{}, ManagedConflicts: []string{}}
 	for _, mod := range lock.Mods {
-		path, err := lockfile.ResolveWithin(modsDir, mod.Filename)
-		if err != nil {
-			return LocalCheck{}, err
+		targets := mod.Targets
+		if lock.Schema < 3 {
+			targets = []string{""}
 		}
-		info, err := os.Lstat(path)
-		if os.IsNotExist(err) {
-			result.Missing = append(result.Missing, mod.Filename)
-			continue
-		}
-		if err != nil {
-			return LocalCheck{}, fmt.Errorf("check installed mod %s: %w", mod.Filename, err)
-		}
-		if !info.Mode().IsRegular() || info.Size() == 0 {
-			result.Damaged = append(result.Damaged, mod.Filename)
-			continue
-		}
-		if mod.SHA256 == "" {
-			result.Unverified = append(result.Unverified, mod.Filename)
-			continue
-		}
-		file, err := os.Open(path)
-		if err != nil {
-			return LocalCheck{}, fmt.Errorf("read installed mod %s: %w", mod.Filename, err)
-		}
-		hash := sha256.New()
-		_, copyErr := io.Copy(hash, file)
-		closeErr := file.Close()
-		if copyErr != nil {
-			return LocalCheck{}, fmt.Errorf("hash installed mod %s: %w", mod.Filename, copyErr)
-		}
-		if closeErr != nil {
-			return LocalCheck{}, closeErr
-		}
-		if !strings.EqualFold(hex.EncodeToString(hash.Sum(nil)), mod.SHA256) {
-			result.Damaged = append(result.Damaged, mod.Filename)
-		}
-	}
-	for _, managed := range lock.Files {
-		path, err := lockfile.ResolveWithin(root, managed.Target)
-		if err != nil {
-			return LocalCheck{}, err
-		}
-		info, err := os.Lstat(path)
-		if os.IsNotExist(err) {
-			result.ManagedMissing = append(result.ManagedMissing, managed.Target)
-			continue
-		}
-		if err != nil {
-			return LocalCheck{}, fmt.Errorf("check managed file %s: %w", managed.Target, err)
-		}
-		if !info.Mode().IsRegular() {
-			result.ManagedConflicts = append(result.ManagedConflicts, managed.Target)
-			continue
-		}
-		if managed.Policy == "replace" {
-			digest, err := hashFile(path)
+		for _, targetID := range targets {
+			modsDir, err := resolveTargetPath(root, lock.Schema, roots, targetID, lock.Pack.ModsDir)
 			if err != nil {
 				return LocalCheck{}, err
 			}
-			if !strings.EqualFold(digest, managed.SHA256) {
-				result.ManagedChanged = append(result.ManagedChanged, managed.Target)
+			path, err := lockfile.ResolveWithin(modsDir, mod.Filename)
+			if err != nil {
+				return LocalCheck{}, err
+			}
+			state := ModCheck{Identity: mod.Identity(), TargetID: targetID, Filename: mod.Filename, State: "synced", ExpectedSHA256: mod.SHA256}
+			info, err := os.Lstat(path)
+			if os.IsNotExist(err) {
+				result.Missing = append(result.Missing, localModLabel(targetID, mod.Filename))
+				state.State = "missing"
+				result.ModStates = append(result.ModStates, state)
+				continue
+			}
+			if err != nil {
+				return LocalCheck{}, fmt.Errorf("check installed mod %s: %w", mod.Filename, err)
+			}
+			if !info.Mode().IsRegular() || info.Size() == 0 {
+				result.Damaged = append(result.Damaged, localModLabel(targetID, mod.Filename))
+				state.State = "damaged"
+				result.ModStates = append(result.ModStates, state)
+				continue
+			}
+			if mod.SHA256 == "" {
+				result.Unverified = append(result.Unverified, localModLabel(targetID, mod.Filename))
+				state.State = "unverified"
+				result.ModStates = append(result.ModStates, state)
+				continue
+			}
+			file, err := os.Open(path)
+			if err != nil {
+				return LocalCheck{}, fmt.Errorf("read installed mod %s: %w", mod.Filename, err)
+			}
+			hash := sha256.New()
+			_, copyErr := io.Copy(hash, file)
+			closeErr := file.Close()
+			if copyErr != nil {
+				return LocalCheck{}, fmt.Errorf("hash installed mod %s: %w", mod.Filename, copyErr)
+			}
+			if closeErr != nil {
+				return LocalCheck{}, closeErr
+			}
+			if !strings.EqualFold(hex.EncodeToString(hash.Sum(nil)), mod.SHA256) {
+				result.Damaged = append(result.Damaged, localModLabel(targetID, mod.Filename))
+				state.State = "damaged"
+				state.ActualSHA256 = hex.EncodeToString(hash.Sum(nil))
+			}
+			result.ModStates = append(result.ModStates, state)
+		}
+	}
+	for _, managed := range lock.Files {
+		targets := managed.Targets
+		if lock.Schema < 3 {
+			targets = []string{""}
+		}
+		for _, targetID := range targets {
+			path, err := resolveTargetPath(root, lock.Schema, roots, targetID, managed.Target)
+			if err != nil {
+				return LocalCheck{}, err
+			}
+			info, err := os.Lstat(path)
+			if os.IsNotExist(err) {
+				result.ManagedMissing = append(result.ManagedMissing, localModLabel(targetID, managed.Target))
+				continue
+			}
+			if err != nil {
+				return LocalCheck{}, fmt.Errorf("check managed file %s: %w", managed.Target, err)
+			}
+			if !info.Mode().IsRegular() {
+				result.ManagedConflicts = append(result.ManagedConflicts, localModLabel(targetID, managed.Target))
+				continue
+			}
+			if managed.Policy == "replace" {
+				digest, err := hashFile(path)
+				if err != nil {
+					return LocalCheck{}, err
+				}
+				if !strings.EqualFold(digest, managed.SHA256) {
+					result.ManagedChanged = append(result.ManagedChanged, localModLabel(targetID, managed.Target))
+				}
 			}
 		}
 	}
@@ -290,6 +340,13 @@ func VerifyLock(root string, lock *lockfile.File) (LocalCheck, error) {
 	return result, nil
 }
 
+func localModLabel(targetID, path string) string {
+	if targetID == "" {
+		return path
+	}
+	return targetID + ":" + filepath.ToSlash(path)
+}
+
 func hashFile(path string) (string, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -304,16 +361,36 @@ func hashFile(path string) (string, error) {
 }
 
 func inspectManagedFiles(root string, old, next *lockfile.File) ([]ManagedChange, []FileConflict, error) {
-	oldFiles := map[string]lockfile.ManagedFile{}
-	if old != nil {
-		for _, f := range old.Files {
-			oldFiles[strings.ToLower(filepath.ToSlash(f.Target))] = f
+	return inspectManagedFilesWithRoots(root, old, next, nil)
+}
+
+func inspectManagedFilesWithRoots(root string, old, next *lockfile.File, roots TargetRoots) ([]ManagedChange, []FileConflict, error) {
+	type targetFile struct {
+		targetID string
+		file     lockfile.ManagedFile
+	}
+	entries := func(lock *lockfile.File) map[string]targetFile {
+		out := map[string]targetFile{}
+		if lock == nil {
+			return out
 		}
+		for _, file := range lock.Files {
+			targetIDs := file.Targets
+			if lock.Schema < 3 {
+				targetIDs = []string{""}
+			}
+			for _, id := range targetIDs {
+				key := strings.ToLower(id + "\x00" + filepath.ToSlash(file.Target))
+				out[key] = targetFile{targetID: id, file: file}
+			}
+		}
+		return out
 	}
-	nextFiles := map[string]lockfile.ManagedFile{}
-	for _, f := range next.Files {
-		nextFiles[strings.ToLower(filepath.ToSlash(f.Target))] = f
+	oldFiles := map[string]targetFile{}
+	if old != nil {
+		oldFiles = entries(old)
 	}
+	nextFiles := entries(next)
 	keys := map[string]bool{}
 	for k := range oldFiles {
 		keys[k] = true
@@ -324,13 +401,22 @@ func inspectManagedFiles(root string, old, next *lockfile.File) ([]ManagedChange
 	var changes []ManagedChange
 	var conflicts []FileConflict
 	for key := range keys {
-		prev, hadPrev := oldFiles[key]
-		item, hasNext := nextFiles[key]
+		prevEntry, hadPrev := oldFiles[key]
+		itemEntry, hasNext := nextFiles[key]
+		prev, item := prevEntry.file, itemEntry.file
+		targetID := itemEntry.targetID
+		if !hasNext {
+			targetID = prevEntry.targetID
+		}
 		target := item.Target
 		if !hasNext {
 			target = prev.Target
 		}
-		path, err := lockfile.ResolveWithin(root, target)
+		fileSchema := next.Schema
+		if !hasNext && old != nil {
+			fileSchema = old.Schema
+		}
+		path, err := resolveTargetPath(root, fileSchema, roots, targetID, target)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -342,7 +428,7 @@ func inspectManagedFiles(root string, old, next *lockfile.File) ([]ManagedChange
 		curHash := ""
 		if exists {
 			if !info.Mode().IsRegular() {
-				conflicts = append(conflicts, FileConflict{Target: target, Reason: "target is not a regular file"})
+				conflicts = append(conflicts, fileConflict(targetID, target, "target_not_regular", "target is not a regular file", ""))
 				continue
 			}
 			curHash, err = hashFile(path)
@@ -356,7 +442,7 @@ func inspectManagedFiles(root string, old, next *lockfile.File) ([]ManagedChange
 				if strings.EqualFold(curHash, prev.SHA256) {
 					action = "remove"
 				} else {
-					conflicts = append(conflicts, FileConflict{Target: target, SHA256: curHash, Reason: "locally modified managed file"})
+					conflicts = append(conflicts, fileConflict(targetID, target, "locally_modified", "locally modified managed file", curHash))
 				}
 			}
 		} else if item.Policy == "if_missing" {
@@ -365,7 +451,11 @@ func inspectManagedFiles(root string, old, next *lockfile.File) ([]ManagedChange
 			}
 		} else if !exists || !strings.EqualFold(curHash, item.SHA256) {
 			if exists && (!hadPrev || prev.Policy == "if_missing" || (prev.Policy == "replace" && !strings.EqualFold(curHash, prev.SHA256))) {
-				conflicts = append(conflicts, FileConflict{Target: target, SHA256: curHash, Reason: "existing file would be replaced"})
+				kind := "existing_unmanaged"
+				if hadPrev {
+					kind = "locally_modified"
+				}
+				conflicts = append(conflicts, fileConflict(targetID, target, kind, "existing file would be replaced", curHash))
 			} else {
 				action = "add"
 				if hadPrev {
@@ -374,7 +464,7 @@ func inspectManagedFiles(root string, old, next *lockfile.File) ([]ManagedChange
 			}
 		}
 		if action != "" {
-			changes = append(changes, ManagedChange{Target: target, Action: action, Policy: func() string {
+			changes = append(changes, ManagedChange{Target: target, TargetID: targetID, Action: action, Policy: func() string {
 				if hasNext {
 					return item.Policy
 				}
@@ -382,14 +472,26 @@ func inspectManagedFiles(root string, old, next *lockfile.File) ([]ManagedChange
 			}()})
 		}
 	}
-	sort.Slice(changes, func(i, j int) bool { return changes[i].Target < changes[j].Target })
-	sort.Slice(conflicts, func(i, j int) bool { return conflicts[i].Target < conflicts[j].Target })
+	sort.Slice(changes, func(i, j int) bool {
+		return changes[i].TargetID+changes[i].Target < changes[j].TargetID+changes[j].Target
+	})
+	sort.Slice(conflicts, func(i, j int) bool {
+		return conflicts[i].TargetID+conflicts[i].Target < conflicts[j].TargetID+conflicts[j].Target
+	})
 	return changes, conflicts, nil
+}
+
+func fileConflict(targetID, target, kind, message, hash string) FileConflict {
+	return FileConflict{Target: target, TargetID: targetID, Kind: kind, SHA256: hash, Message: message, Reason: message}
 }
 
 // Verify checks the installed lock and managed files without network access.
 // It shares the sync lock with Check and RunRevision.
 func Verify(root string) (LocalCheck, error) {
+	return VerifyWithRoots(root, nil)
+}
+
+func VerifyWithRoots(root string, roots TargetRoots) (LocalCheck, error) {
 	release, err := acquireSyncLock(root)
 	if err != nil {
 		return LocalCheck{}, err
@@ -406,5 +508,8 @@ func Verify(root string) (LocalCheck, error) {
 	if err := requireSupportedInstallSchema(lock, nil); err != nil {
 		return LocalCheck{}, err
 	}
-	return VerifyLock(root, lock)
+	if err := ValidateTargetRoots(root, lock, roots); err != nil {
+		return LocalCheck{}, err
+	}
+	return VerifyLockWithRoots(root, lock, roots)
 }

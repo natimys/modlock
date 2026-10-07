@@ -3,6 +3,8 @@ package app
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -13,6 +15,40 @@ import (
 	"modlock/internal/lockfile"
 	"modlock/internal/providers"
 )
+
+func TestMigrateSchema2To3MakesEntriesClientOnlyAndKeepsBackup(t *testing.T) {
+	root := t.TempDir()
+	oldRoot := os.Getenv(ExplicitRootEnv)
+	t.Cleanup(func() { _ = os.Setenv(ExplicitRootEnv, oldRoot) })
+	if err := os.Setenv(ExplicitRootEnv, root); err != nil {
+		t.Fatal(err)
+	}
+	data := []byte("content")
+	h := sha256.Sum256(data)
+	lock := &lockfile.File{Schema: 2, Pack: lockfile.Pack{Repository: "https://example.test/pack.git", Branch: "main", LockPath: "mod.lock", ModsDir: "mods", Name: "Pack", Version: "1"}, Mods: []lockfile.ModEntry{{ID: "example:mod", Filename: "a.jar", Source: "repo", Path: "files/mods/a.jar", SHA256: hex.EncodeToString(h[:])}}, Files: []lockfile.ManagedFile{{Path: "files/config/a", Target: "config/a", SHA256: hex.EncodeToString(h[:]), Policy: "replace"}}}
+	path := filepath.Join(root, "mod.lock")
+	if err := lockfile.Write(path, lock); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := MigrateSchema3(nil); err != nil {
+		t.Fatal(err)
+	}
+	got, err := lockfile.Read(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Schema != 3 || len(got.Mods) != 1 || len(got.Mods[0].Targets) != 1 || got.Mods[0].Targets[0] != "client" || len(got.Files) != 1 || got.Files[0].Targets[0] != "client" {
+		t.Fatalf("unexpected migrated lock: %#v", got)
+	}
+	backup, err := os.ReadFile(path + ".schema2.bak")
+	if err != nil || string(backup) != string(before) {
+		t.Fatalf("schema2 backup differs: %v", err)
+	}
+}
 
 func TestAddRepoSource(t *testing.T) {
 	root := t.TempDir()

@@ -79,6 +79,211 @@ func managedEntry(path, target, policy string, data []byte) lockfile.ManagedFile
 	return lockfile.ManagedFile{Path: path, Target: target, Policy: policy, SHA256: hex.EncodeToString(digest[:])}
 }
 
+func schema3Fixture(t *testing.T, roots TargetRoots, mods []lockfile.ModEntry, files []lockfile.ManagedFile, payloads map[string][]byte) (string, string) {
+	t.Helper()
+	remote := filepath.Join(t.TempDir(), "remote")
+	pack := lockfile.Pack{Repository: remote, Branch: "master", LockPath: "mod.lock", ModsDir: "mods", Name: "Target Pack", Version: "1"}
+	for rel, data := range payloads {
+		full := filepath.Join(remote, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(full), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, data, 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	manifest := &lockfile.File{Schema: 3, Pack: pack, Mods: mods, Files: files}
+	if err := lockfile.Write(filepath.Join(remote, "mod.lock"), manifest); err != nil {
+		t.Fatal(err)
+	}
+	repo, err := git.PlainInit(remote, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	worktree, err := repo.Worktree()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rel := range payloads {
+		if _, err = worktree.Add(filepath.ToSlash(rel)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err = worktree.Add("mod.lock"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = worktree.Commit("schema 3", &git.CommitOptions{Author: &object.Signature{Name: "test", Email: "test@example.com", When: time.Now()}}); err != nil {
+		t.Fatal(err)
+	}
+	head, err := repo.Head()
+	if err != nil {
+		t.Fatal(err)
+	}
+	processRoot := roots["client"]
+	if err := os.MkdirAll(processRoot, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := lockfile.Write(filepath.Join(processRoot, "mod.lock"), &lockfile.File{Schema: 3, Pack: pack}); err != nil {
+		t.Fatal(err)
+	}
+	return processRoot, head.Hash().String()
+}
+
+func TestSchema3ApplyVerifyAndRepairAcrossTargets(t *testing.T) {
+	client, server := filepath.Join(t.TempDir(), "minecraft"), filepath.Join(t.TempDir(), "server")
+	roots := TargetRoots{"client": client, "server": server}
+	clientBytes, serverBytes, sharedBytes := []byte("client jar"), []byte("server jar"), []byte("shared jar")
+	entry := func(id, name, path string, data []byte, targets ...string) lockfile.ModEntry {
+		h := sha256.Sum256(data)
+		return lockfile.ModEntry{ID: id, Version: "1", Filename: name, Source: "repo", Path: path, SHA256: hex.EncodeToString(h[:]), Targets: targets}
+	}
+	mods := []lockfile.ModEntry{entry("client-only", "client.jar", "files/mods/client.jar", clientBytes, "client"), entry("server-only", "server.jar", "files/mods/server.jar", serverBytes, "server"), entry("shared", "shared.jar", "files/mods/shared.jar", sharedBytes, "client", "server")}
+	clientCfg, serverCfg := []byte("client config"), []byte("server config")
+	fileEntry := func(source, target string, data []byte, targets ...string) lockfile.ManagedFile {
+		h := sha256.Sum256(data)
+		return lockfile.ManagedFile{Path: source, Target: target, SHA256: hex.EncodeToString(h[:]), Policy: "replace", Targets: targets}
+	}
+	files := []lockfile.ManagedFile{fileEntry("files/config/client.cfg", "config/client.cfg", clientCfg, "client"), fileEntry("files/config/server.cfg", "config/server.cfg", serverCfg, "server")}
+	root, revision := schema3Fixture(t, roots, mods, files, map[string][]byte{"files/mods/client.jar": clientBytes, "files/mods/server.jar": serverBytes, "files/mods/shared.jar": sharedBytes, "files/config/client.cfg": clientCfg, "files/config/server.cfg": serverCfg})
+	preview, err := CheckWithRoots(context.Background(), root, roots, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preview.Revision != revision {
+		t.Fatalf("preview revision mismatch: %s != %s", preview.Revision, revision)
+	}
+	if _, err = RunRevisionConfirmedWithRoots(context.Background(), root, revision, nil, nil, roots); err != nil {
+		t.Fatal(err)
+	}
+	for path, want := range map[string]string{filepath.Join(client, "mods", "client.jar"): string(clientBytes), filepath.Join(server, "mods", "server.jar"): string(serverBytes), filepath.Join(client, "mods", "shared.jar"): string(sharedBytes), filepath.Join(server, "mods", "shared.jar"): string(sharedBytes), filepath.Join(client, "config", "client.cfg"): string(clientCfg), filepath.Join(server, "config", "server.cfg"): string(serverCfg)} {
+		got, err := os.ReadFile(path)
+		if err != nil || string(got) != want {
+			t.Fatalf("materialized %s as %q, %v", path, got, err)
+		}
+	}
+	check, err := VerifyWithRoots(root, roots)
+	if err != nil || check.NeedsRecovery {
+		t.Fatalf("healthy target install failed verification: %#v, %v", check, err)
+	}
+	if err := os.WriteFile(filepath.Join(server, "mods", "server.jar"), []byte("damaged"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	check, err = VerifyWithRoots(root, roots)
+	if err != nil || !check.NeedsRecovery {
+		t.Fatalf("damaged server target was not detected: %#v, %v", check, err)
+	}
+	if _, err = RunRevisionConfirmedWithRoots(context.Background(), root, revision, nil, nil, roots); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(filepath.Join(server, "mods", "server.jar"))
+	if err != nil || string(got) != string(serverBytes) {
+		t.Fatalf("server target repair failed: %q, %v", got, err)
+	}
+}
+
+func TestSchema3OperationsRequireLauncherTargetRoots(t *testing.T) {
+	lock := &lockfile.File{Schema: 3, Pack: lockfile.Pack{Repository: "https://example.test/pack.git", Branch: "main", LockPath: "mod.lock", ModsDir: "mods", Name: "x", Version: "1"}, Mods: []lockfile.ModEntry{{ID: "server", Filename: "server.jar", Source: "repo", Path: "files/server.jar", SHA256: strings.Repeat("a", 64), Targets: []string{"server"}}}}
+	if err := ValidateTargetRoots(t.TempDir(), lock, nil); failure.Code(err) != failure.InvalidRequest {
+		t.Fatalf("missing trusted target root was not rejected: %v", err)
+	}
+}
+
+func TestSchema3ApplyRollsBackAllRootsOnRenameFailure(t *testing.T) {
+	client, server := filepath.Join(t.TempDir(), "client"), filepath.Join(t.TempDir(), "server")
+	roots := TargetRoots{"client": client, "server": server}
+	oldBytes, clientBytes, serverBytes := []byte("old client"), []byte("new client"), []byte("new server")
+	hash := func(b []byte) string { h := sha256.Sum256(b); return hex.EncodeToString(h[:]) }
+	mods := []lockfile.ModEntry{
+		{ID: "client", Version: "2", Filename: "client.jar", Source: "repo", Path: "files/mods/client.jar", SHA256: hash(clientBytes), Targets: []string{"client"}},
+		{ID: "server", Version: "1", Filename: "server.jar", Source: "repo", Path: "files/mods/server.jar", SHA256: hash(serverBytes), Targets: []string{"server"}},
+	}
+	root, revision := schema3Fixture(t, roots, mods, nil, map[string][]byte{"files/mods/client.jar": clientBytes, "files/mods/server.jar": serverBytes})
+	if err := os.MkdirAll(filepath.Join(client, "mods"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(client, "mods", "client.jar"), oldBytes, 0644); err != nil {
+		t.Fatal(err)
+	}
+	oldLock := &lockfile.File{Schema: 3, Mods: []lockfile.ModEntry{{ID: "client", Version: "1", Filename: "client.jar", Source: "repo", Path: "files/mods/client.jar", SHA256: hash(oldBytes), Targets: []string{"client"}}}}
+	remoteLock, err := lockfile.Read(filepath.Join(root, "mod.lock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldLock.Pack = remoteLock.Pack
+	if err := lockfile.Write(filepath.Join(root, "mod.lock"), oldLock); err != nil {
+		t.Fatal(err)
+	}
+	originalRename := renameInstalledFile
+	defer func() { renameInstalledFile = originalRename }()
+	failed := false
+	renameInstalledFile = func(src, dst string) error {
+		if !failed && strings.Contains(filepath.ToSlash(dst), "/server/mods/server.jar") {
+			failed = true
+			return os.ErrPermission
+		}
+		return os.Rename(src, dst)
+	}
+	if _, err := RunRevisionConfirmedWithRoots(context.Background(), root, revision, nil, nil, roots); err == nil {
+		t.Fatal("injected mutation failure was not returned")
+	}
+	got, err := os.ReadFile(filepath.Join(client, "mods", "client.jar"))
+	if err != nil || string(got) != string(oldBytes) {
+		t.Fatalf("client target was not rolled back: %q, %v", got, err)
+	}
+	if _, err := os.Stat(filepath.Join(server, "mods", "server.jar")); !os.IsNotExist(err) {
+		t.Fatalf("server target survived rollback: %v", err)
+	}
+	installed, err := lockfile.Read(filepath.Join(root, "mod.lock"))
+	if err != nil || installed.Mods[0].Version != "1" {
+		t.Fatalf("lock was not rolled back: %#v, %v", installed, err)
+	}
+}
+
+func TestSchema3ConflictKindAndStaleConfirmationAreTargetScoped(t *testing.T) {
+	client := filepath.Join(t.TempDir(), "client")
+	roots := TargetRoots{"client": client}
+	oldBytes, desired, localEdit, laterEdit := []byte("old"), []byte("new"), []byte("local edit"), []byte("changed after preview")
+	digest := func(b []byte) string { h := sha256.Sum256(b); return hex.EncodeToString(h[:]) }
+	file := managedEntry("files/config/a.cfg", "config/a.cfg", "replace", desired)
+	file.Targets = []string{"client"}
+	root, revision := schema3Fixture(t, roots, nil, []lockfile.ManagedFile{file}, map[string][]byte{"files/config/a.cfg": desired})
+	remoteLock, err := lockfile.Read(filepath.Join(root, "mod.lock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldFile := managedEntry("files/config/a.cfg", "config/a.cfg", "replace", oldBytes)
+	oldFile.Targets = []string{"client"}
+	remoteLock.Files = []lockfile.ManagedFile{oldFile}
+	if err := lockfile.Write(filepath.Join(root, "mod.lock"), remoteLock); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(client, "config"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(client, "config", "a.cfg"), localEdit, 0644); err != nil {
+		t.Fatal(err)
+	}
+	preview, err := CheckWithRoots(context.Background(), root, roots, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(preview.Conflicts) != 1 || preview.Conflicts[0].Kind != "locally_modified" || preview.Conflicts[0].TargetID != "client" || preview.Conflicts[0].Message == "" {
+		t.Fatalf("machine-readable target conflict missing: %#v", preview.Conflicts)
+	}
+	confirmed := ConfirmedConflict{Target: preview.Conflicts[0].Target, TargetID: preview.Conflicts[0].TargetID, SHA256: digest(localEdit)}
+	if err := os.WriteFile(filepath.Join(client, "config", "a.cfg"), laterEdit, 0644); err != nil {
+		t.Fatal(err)
+	}
+	_, err = RunRevisionConfirmedWithRoots(context.Background(), root, revision, nil, []ConfirmedConflict{confirmed}, roots)
+	if failure.Code(err) != failure.Conflict {
+		t.Fatalf("stale target confirmation accepted: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(client, "config", "a.cfg"))
+	if err != nil || string(got) != string(laterEdit) {
+		t.Fatalf("stale apply changed user file: %q, %v", got, err)
+	}
+}
+
 func TestSchema2ApplicationIsSupported(t *testing.T) {
 	local := &lockfile.File{Schema: 1}
 	remote := &lockfile.File{Schema: 2}
