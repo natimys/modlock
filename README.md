@@ -51,6 +51,13 @@ back to another instance. CLI calls without this option retain automatic discove
 
 For an existing pack, run `modlock init`, enter the public repository URL, and confirm the generated lock. Unknown/custom jars are copied to `files/mods/` automatically.
 
+To upgrade an existing schema 1 lock, run `modlock migrate` from the pack root. Supply the pack name/version and exact Minecraft version; add the loader ID/version when the pack uses a loader. The command calculates SHA-256 from each mod JAR in the configured mods directory or at its repository path, saves the old lock as `mod.lock.schema1.bak`, and writes schema 2 to the original lock path. Make sure all mod JARs are present locally first. The command does not infer managed config/script policies; review the generated lock and add any `[[files]]` entries deliberately.
+
+```powershell
+modlock migrate --name "My Pack" --version "2.0.0" --minecraft "1.21.1" `
+  --loader-id "net.fabricmc.fabric-loader" --loader-version "0.16.10"
+```
+
 After changing `mods/`:
 
 ```powershell

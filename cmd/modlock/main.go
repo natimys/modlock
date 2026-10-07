@@ -87,6 +87,8 @@ func main() {
 			err = app.Push(ctx, os.Args[2:])
 		case "init":
 			err = app.Init(ctx, os.Stdin)
+		case "migrate":
+			err = app.Migrate(os.Args[2:])
 		case "add":
 			err = app.Add(ctx, os.Args[2:], os.Stdin)
 		case "ignore":
@@ -130,7 +132,7 @@ func main() {
 				}
 			}
 		default:
-			fmt.Fprintln(os.Stderr, "Usage: modlock [--root directory] [sync|diff|push|init|add|ignore|revert|version|self-update]")
+			fmt.Fprintln(os.Stderr, "Usage: modlock [--root directory] [sync|diff|push|init|migrate|add|ignore|revert|version|self-update]")
 			os.Exit(2)
 		}
 	}
