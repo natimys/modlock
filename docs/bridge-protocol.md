@@ -46,14 +46,18 @@ its final event is authoritative. Qt must not normally terminate or kill it.
 - `read`: `params` contains `repository`, optional `branch`, `lock_path`, and
   `mods_dir`. Returns `revision` and `lock`; does not install files.
 - `install`: `params` contains a `pack` source and the full previewed `revision`.
-  It installs schema 1 mods or schema 2 mods and managed files transactionally
-  into an empty temporary instance.
+  It may also contain `confirmed_conflicts`, an array of `{target, sha256}`
+  values returned by preview. It installs schema 1 mods or schema 2 mods and
+  managed files transactionally into an empty temporary instance. The temporary
+  bootstrap lock contains pack metadata only; it does not claim that mods or
+  managed files were already installed.
 - `verify`: checks the installed lock's managed mods and schema 2 files offline.
   Returns `state` (`healthy`, `unverified`, or `incomplete`), `needs_recovery`,
   and `missing`, `damaged`, and `unverified` filename lists. JARs must be regular
   non-empty files. Schema 2 `replace` files are checked by SHA-256, while
-  `if_missing` files are checked for presence and regular-file type. Managed file
-  issues are reported separately from damaged mods.
+  `if_missing` files are checked for presence and regular-file type, without
+  checking the contents of existing ordinary files. Missing files under either
+  policy are included in `managed_missing` and set `needs_recovery`.
 - `check`: reads the local installed lock and returns `revision`, `lock`, and
   `diff` with `added`, `removed`, `updated`, and `unchanged` mods, plus
   `local_installation` with the verify state, and `managed_files` and `conflicts`
@@ -83,7 +87,10 @@ its final event is authoritative. Qt must not normally terminate or kill it.
 {"type":"request","id":"read-1","operation":"read","params":{"repository":"https://github.com/example/pack.git","branch":"main","lock_path":"mod.lock"}}
 ```
 
-Errors contain a stable `code` and a displayable `message`. Codes are `network`,
+Errors contain a stable `code` and a displayable `message`. Conflicts also include
+`error.details.conflicts`, a structured list of `{target, sha256, reason}` values
+that Qt can show and return as `confirmed_conflicts`; stale confirmations return
+the latest conflicts. Codes are `network`,
 `git_authorization`, `unsupported_format`, `unsupported_protocol`, `file_conflict`,
 `instance_busy`, `recovery_failed`, `cancelled`, `invalid_request`, and `internal`.
 Qt uses the code, never parses message text. A transport failure writing stdout

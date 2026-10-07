@@ -20,8 +20,9 @@ const (
 )
 
 type Error struct {
-	Code  string
-	Cause error
+	Code    string
+	Cause   error
+	Details any
 }
 
 func (e *Error) Error() string { return e.Cause.Error() }
@@ -31,6 +32,21 @@ func Wrap(code string, cause error) error {
 		return nil
 	}
 	return &Error{Code: code, Cause: cause}
+}
+
+func WrapDetails(code string, cause error, details any) error {
+	if cause == nil {
+		return nil
+	}
+	return &Error{Code: code, Cause: cause, Details: details}
+}
+
+func Details(err error) any {
+	var typed *Error
+	if errors.As(err, &typed) {
+		return typed.Details
+	}
+	return nil
 }
 
 func Code(err error) string {

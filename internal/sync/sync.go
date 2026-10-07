@@ -47,6 +47,62 @@ type ConfirmedConflict struct {
 	SHA256 string `json:"sha256"`
 }
 
+type targetState struct {
+	exists  bool
+	regular bool
+	sha256  string
+}
+
+func snapshotManagedTargets(root string, old, next *lockfile.File) (map[string]targetState, error) {
+	targets := map[string]string{}
+	if old != nil {
+		for _, file := range old.Files {
+			targets[strings.ToLower(filepath.ToSlash(file.Target))] = file.Target
+		}
+	}
+	for _, file := range next.Files {
+		targets[strings.ToLower(filepath.ToSlash(file.Target))] = file.Target
+	}
+	states := make(map[string]targetState, len(targets))
+	for key, target := range targets {
+		path, err := lockfile.ResolveWithin(root, target)
+		if err != nil {
+			return nil, err
+		}
+		info, err := os.Lstat(path)
+		if os.IsNotExist(err) {
+			states[key] = targetState{}
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		state := targetState{exists: true, regular: info.Mode().IsRegular()}
+		if state.regular {
+			state.sha256, err = hashFile(path)
+			if err != nil {
+				return nil, err
+			}
+		}
+		states[key] = state
+	}
+	return states, nil
+}
+
+func changedManagedTarget(before, after map[string]targetState) string {
+	for key, initial := range before {
+		if current, ok := after[key]; !ok || current != initial {
+			return key
+		}
+	}
+	for key := range after {
+		if _, ok := before[key]; !ok {
+			return key
+		}
+	}
+	return ""
+}
+
 func RunRevisionConfirmed(ctx context.Context, root, revision string, progress Progress, confirmed []ConfirmedConflict) (Result, error) {
 	if revision == "" {
 		return Result{}, fmt.Errorf("apply requires the previewed Git commit")
@@ -101,12 +157,16 @@ func run(ctx context.Context, root, revision string, progress Progress, confirme
 		confirmedByTarget[strings.ToLower(filepath.ToSlash(c.Target))] = strings.ToLower(c.SHA256)
 	}
 	for _, c := range conflicts {
-		if c.Reason != "locally modified managed file" {
-			return Result{}, failure.Wrap(failure.Conflict, fmt.Errorf("%s: %s", c.Target, c.Reason))
+		if c.Reason != "existing file would be replaced" && c.Reason != "locally modified managed file" {
+			return Result{}, failure.WrapDetails(failure.Conflict, fmt.Errorf("%s: %s", c.Target, c.Reason), map[string]any{"conflicts": conflicts})
 		}
 		if confirmedByTarget[strings.ToLower(filepath.ToSlash(c.Target))] != strings.ToLower(c.SHA256) {
-			return Result{}, failure.Wrap(failure.Conflict, fmt.Errorf("managed file conflict at %s (sha256 %s)", c.Target, c.SHA256))
+			return Result{}, failure.WrapDetails(failure.Conflict, fmt.Errorf("managed file conflict at %s (sha256 %s)", c.Target, c.SHA256), map[string]any{"conflicts": conflicts})
 		}
+	}
+	managedBefore, err := snapshotManagedTargets(root, old, next)
+	if err != nil {
+		return Result{}, err
 	}
 	modsDir, err := lockfile.ResolveWithin(root, old.Pack.ModsDir)
 	if err != nil {
@@ -272,7 +332,7 @@ func run(ctx context.Context, root, revision string, progress Progress, confirme
 			return Result{}, statErr
 		}
 		if exists && !info.Mode().IsRegular() {
-			return Result{}, failure.Wrap(failure.Conflict, fmt.Errorf("managed target %s is not a regular file", target))
+			return Result{}, failure.WrapDetails(failure.Conflict, fmt.Errorf("managed target %s is not a regular file", target), map[string]any{"conflicts": []FileConflict{{Target: target, Reason: "target is not a regular file"}}})
 		}
 		oldFile, hadOld := oldManaged[key]
 		newFile, hasNew := nextManaged[key]
@@ -302,8 +362,9 @@ func run(ctx context.Context, root, revision string, progress Progress, confirme
 			if strings.EqualFold(digest, newFile.SHA256) {
 				continue
 			}
-			if hadOld && oldFile.Policy == "replace" && !strings.EqualFold(digest, oldFile.SHA256) && confirmedByTarget[key] != strings.ToLower(digest) {
-				return Result{}, failure.Wrap(failure.Conflict, fmt.Errorf("managed file conflict at %s (sha256 %s)", target, digest))
+			if (!hadOld || oldFile.Policy == "if_missing" || (oldFile.Policy == "replace" && !strings.EqualFold(digest, oldFile.SHA256))) && confirmedByTarget[key] != strings.ToLower(digest) {
+				conflict := FileConflict{Target: target, SHA256: digest, Reason: "existing file would be replaced"}
+				return Result{}, failure.WrapDetails(failure.Conflict, fmt.Errorf("managed file conflict at %s (sha256 %s)", target, digest), map[string]any{"conflicts": []FileConflict{conflict}})
 			}
 		}
 		source, resolveErr := lockfile.ResolveWithin(repoDir, newFile.Path)
@@ -311,6 +372,7 @@ func run(ctx context.Context, root, revision string, progress Progress, confirme
 			return Result{}, resolveErr
 		}
 		staged := filepath.Join(managedStage, fmt.Sprintf("%04d", i))
+		progress("Копирование " + target + "...")
 		if err = providers.Copy(source, staged); err != nil {
 			return Result{}, fmt.Errorf("stage managed file %s: %w", target, err)
 		}
@@ -422,6 +484,21 @@ func run(ctx context.Context, root, revision string, progress Progress, confirme
 	// Hashes in the confirmation are authorization for one exact observed file.
 	// Recheck immediately before mutation so a file changed during preparation
 	// cannot be overwritten using an earlier preview.
+	managedAfter, stateErr := snapshotManagedTargets(root, old, next)
+	if stateErr != nil {
+		return Result{}, stateErr
+	}
+	if changedManagedTarget(managedBefore, managedAfter) != "" {
+		changed := changedManagedTarget(managedBefore, managedAfter)
+		_, latestConflicts, inspectErr := inspectManagedFiles(root, old, next)
+		if inspectErr != nil {
+			return Result{}, inspectErr
+		}
+		state := managedAfter[changed]
+		latestConflicts = append(latestConflicts, FileConflict{Target: filepath.ToSlash(changed), SHA256: state.sha256, Reason: "target changed during preparation"})
+		sort.Slice(latestConflicts, func(i, j int) bool { return latestConflicts[i].Target < latestConflicts[j].Target })
+		return Result{}, failure.WrapDetails(failure.Conflict, fmt.Errorf("managed file changed during preparation: %s", changed), map[string]any{"conflicts": latestConflicts})
+	}
 	for _, conflict := range conflicts {
 		path, resolveErr := lockfile.ResolveWithin(root, conflict.Target)
 		if resolveErr != nil {
@@ -429,7 +506,8 @@ func run(ctx context.Context, root, revision string, progress Progress, confirme
 		}
 		current, hashErr := hashFile(path)
 		if hashErr != nil || !strings.EqualFold(current, conflict.SHA256) || confirmedByTarget[strings.ToLower(filepath.ToSlash(conflict.Target))] != strings.ToLower(current) {
-			return Result{}, failure.Wrap(failure.Conflict, fmt.Errorf("managed file changed after preview: %s", conflict.Target))
+			_, latestConflicts, _ := inspectManagedFiles(root, old, next)
+			return Result{}, failure.WrapDetails(failure.Conflict, fmt.Errorf("managed file changed after preview: %s", conflict.Target), map[string]any{"conflicts": latestConflicts})
 		}
 	}
 	if err = os.MkdirAll(modsDir, 0755); err != nil {

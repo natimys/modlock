@@ -255,9 +255,7 @@ func VerifyLock(root string, lock *lockfile.File) (LocalCheck, error) {
 		}
 		info, err := os.Lstat(path)
 		if os.IsNotExist(err) {
-			if managed.Policy == "replace" {
-				result.ManagedMissing = append(result.ManagedMissing, managed.Target)
-			}
+			result.ManagedMissing = append(result.ManagedMissing, managed.Target)
 			continue
 		}
 		if err != nil {
@@ -366,8 +364,8 @@ func inspectManagedFiles(root string, old, next *lockfile.File) ([]ManagedChange
 				action = "add"
 			}
 		} else if !exists || !strings.EqualFold(curHash, item.SHA256) {
-			if exists && hadPrev && prev.Policy == "replace" && !strings.EqualFold(curHash, prev.SHA256) {
-				conflicts = append(conflicts, FileConflict{Target: target, SHA256: curHash, Reason: "locally modified managed file"})
+			if exists && (!hadPrev || prev.Policy == "if_missing" || (prev.Policy == "replace" && !strings.EqualFold(curHash, prev.SHA256))) {
+				conflicts = append(conflicts, FileConflict{Target: target, SHA256: curHash, Reason: "existing file would be replaced"})
 			} else {
 				action = "add"
 				if hadPrev {

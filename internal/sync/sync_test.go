@@ -132,6 +132,116 @@ func TestSchema2ConflictNeedsMatchingConfirmation(t *testing.T) {
 	}
 }
 
+func TestSchema2NewReplaceRequiresConfirmation(t *testing.T) {
+	next := []lockfile.ManagedFile{managedEntry("files/config.cfg", "config/config.cfg", "replace", []byte("build"))}
+	root, revision := schema2Fixture(t, nil, next, map[string][]byte{"config/config.cfg": []byte("local")}, map[string][]byte{"files/config.cfg": []byte("build")})
+	preview, err := Check(context.Background(), root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(preview.Conflicts) != 1 || preview.Conflicts[0].Target != "config/config.cfg" || preview.Conflicts[0].SHA256 == "" {
+		t.Fatalf("new replace conflict missing from preview: %#v", preview.Conflicts)
+	}
+	if _, err = RunRevision(context.Background(), root, revision, nil); failure.Code(err) != failure.Conflict {
+		t.Fatalf("new replace overwrote an unmanaged file: %v", err)
+	}
+	details, ok := failure.Details(err).(map[string]any)
+	if !ok || details["conflicts"] == nil {
+		t.Fatalf("conflict omitted structured details: %#v", failure.Details(err))
+	}
+	confirmation := ConfirmedConflict{Target: preview.Conflicts[0].Target, SHA256: preview.Conflicts[0].SHA256}
+	if _, err = RunRevisionConfirmed(context.Background(), root, revision, nil, []ConfirmedConflict{confirmation}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSchema2IfMissingToReplaceRequiresConfirmation(t *testing.T) {
+	old := []lockfile.ManagedFile{managedEntry("files/config.cfg", "config/config.cfg", "if_missing", []byte("first"))}
+	next := []lockfile.ManagedFile{managedEntry("files/config.cfg", "config/config.cfg", "replace", []byte("build"))}
+	root, revision := schema2Fixture(t, old, next, map[string][]byte{"config/config.cfg": []byte("user")}, map[string][]byte{"files/config.cfg": []byte("build")})
+	preview, err := Check(context.Background(), root, nil)
+	if err != nil || len(preview.Conflicts) != 1 {
+		t.Fatalf("policy transition conflict missing: %#v, %v", preview.Conflicts, err)
+	}
+	if _, err = RunRevision(context.Background(), root, revision, nil); failure.Code(err) != failure.Conflict {
+		t.Fatalf("if_missing to replace overwrote local file: %v", err)
+	}
+	confirmation := ConfirmedConflict{Target: preview.Conflicts[0].Target, SHA256: preview.Conflicts[0].SHA256}
+	if _, err = RunRevisionConfirmed(context.Background(), root, revision, nil, []ConfirmedConflict{confirmation}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSchema2ChangedRemovedReplaceRequiresConfirmation(t *testing.T) {
+	old := []lockfile.ManagedFile{managedEntry("files/config.cfg", "config/config.cfg", "replace", []byte("old"))}
+	root, revision := schema2Fixture(t, old, nil, map[string][]byte{"config/config.cfg": []byte("user edit")}, nil)
+	preview, err := Check(context.Background(), root, nil)
+	if err != nil || len(preview.Conflicts) != 1 {
+		t.Fatalf("removal conflict missing: %#v, %v", preview.Conflicts, err)
+	}
+	if _, err = RunRevision(context.Background(), root, revision, nil); failure.Code(err) != failure.Conflict {
+		t.Fatalf("changed replace file was removed without confirmation: %v", err)
+	}
+	confirmation := ConfirmedConflict{Target: preview.Conflicts[0].Target, SHA256: preview.Conflicts[0].SHA256}
+	if _, err = RunRevisionConfirmed(context.Background(), root, revision, nil, []ConfirmedConflict{confirmation}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = os.Stat(filepath.Join(root, "config", "config.cfg")); !os.IsNotExist(err) {
+		t.Fatalf("confirmed removed file remains: %v", err)
+	}
+}
+
+func TestSchema2MatchingReplaceNeedsNoConfirmation(t *testing.T) {
+	data := []byte("already installed")
+	next := []lockfile.ManagedFile{managedEntry("files/config.cfg", "config/config.cfg", "replace", data)}
+	root, revision := schema2Fixture(t, nil, next, map[string][]byte{"config/config.cfg": data}, map[string][]byte{"files/config.cfg": data})
+	preview, err := Check(context.Background(), root, nil)
+	if err != nil || len(preview.Conflicts) != 0 {
+		t.Fatalf("matching file requested confirmation: %#v, %v", preview.Conflicts, err)
+	}
+	if _, err = RunRevision(context.Background(), root, revision, nil); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestApplyRejectsManagedTargetThatAppearsDuringPreparation(t *testing.T) {
+	next := []lockfile.ManagedFile{managedEntry("files/config.cfg", "config/config.cfg", "if_missing", []byte("build"))}
+	root, revision := schema2Fixture(t, nil, next, nil, map[string][]byte{"files/config.cfg": []byte("build")})
+	_, err := RunRevision(context.Background(), root, revision, func(message string) {
+		if strings.Contains(message, "config/config.cfg") {
+			if writeErr := os.MkdirAll(filepath.Join(root, "config"), 0755); writeErr != nil {
+				t.Errorf("create target directory: %v", writeErr)
+				return
+			}
+			if writeErr := os.WriteFile(filepath.Join(root, "config", "config.cfg"), []byte("appeared during prep"), 0644); writeErr != nil {
+				t.Errorf("create raced target: %v", writeErr)
+			}
+		}
+	})
+	if failure.Code(err) != failure.Conflict {
+		t.Fatalf("stale preparation overwrote newly created if_missing target: %v", err)
+	}
+	if got, readErr := os.ReadFile(filepath.Join(root, "config", "config.cfg")); readErr != nil || string(got) != "appeared during prep" {
+		t.Fatalf("raced file was overwritten: %q, %v", got, readErr)
+	}
+}
+
+func TestMissingIfMissingRequiresRecovery(t *testing.T) {
+	entry := managedEntry("files/config.cfg", "config/config.cfg", "if_missing", []byte("build"))
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "mods"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	lock := &lockfile.File{Schema: 2, Pack: lockfile.Pack{Repository: "https://example.test/pack.git", Name: "Test", Version: "1"}, Files: []lockfile.ManagedFile{entry}}
+	if err := lockfile.Write(filepath.Join(root, lockfile.DefaultFilename), lock); err != nil {
+		t.Fatal(err)
+	}
+	result, err := Verify(root)
+	if err != nil || !result.NeedsRecovery || len(result.ManagedMissing) != 1 || result.ManagedMissing[0] != entry.Target {
+		t.Fatalf("missing if_missing target was not marked for recovery: %#v, %v", result, err)
+	}
+}
+
 func TestRepoSourceSync(t *testing.T) {
 	remote := filepath.Join(t.TempDir(), "remote")
 	if err := os.MkdirAll(filepath.Join(remote, "files", "mods"), 0755); err != nil {

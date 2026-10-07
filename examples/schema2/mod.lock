@@ -1,0 +1,37 @@
+schema = 2
+
+[pack]
+repository = "https://github.com/example/techmagic-modpack.git"
+branch = "main"
+lock_path = "mod.lock"
+mods_dir = "mods"
+name = "Tech Magic"
+version = "1.4.0"
+
+[[pack.components]]
+id = "net.minecraft"
+version = "1.21.1"
+
+[[pack.components]]
+id = "net.fabricmc.fabric-loader"
+version = "0.16.10"
+
+[[mods]]
+id = "modrinth:create"
+version = "6.0.10"
+filename = "create-1.21.1.jar"
+source = "repo"
+path = "files/mods/create-1.21.1.jar"
+sha256 = "2e1ba0e9d831c3dbb45b5b05f083187af73fc5c4c4582b50b48ca3828f4786de"
+
+[[files]]
+path = "files/config/pack.toml"
+target = "config/pack.toml"
+sha256 = "040ba006f8a150a21bcf1c363f463e70c88dbea33d66d6464ff65feaafcbc1b4"
+policy = "replace"
+
+[[files]]
+path = "files/scripts/first-run.ps1"
+target = "scripts/first-run.ps1"
+sha256 = "7170e2ff09bd4e46dd7f212f6f02e7f3cac56fe2dcd4470e30aa83daee7d61e3"
+policy = "if_missing"

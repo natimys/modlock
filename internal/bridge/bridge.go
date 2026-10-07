@@ -52,8 +52,9 @@ func Run(args []string, input io.Reader, output io.Writer) error {
 			return map[string]any{"revision": snapshot.Revision, "lock": snapshot.Lock}, nil
 		case "install":
 			var params struct {
-				Pack     lockfile.Pack `json:"pack"`
-				Revision string        `json:"revision"`
+				Pack               lockfile.Pack              `json:"pack"`
+				Revision           string                     `json:"revision"`
+				ConfirmedConflicts []syncer.ConfirmedConflict `json:"confirmed_conflicts,omitempty"`
 			}
 			if err := decode(request.Params, &params); err != nil {
 				return nil, failure.Wrap(failure.InvalidRequest, err)
@@ -80,10 +81,11 @@ func Run(args []string, input io.Reader, output io.Writer) error {
 			// Seed the temporary instance with the exact previewed manifest. RunRevision
 			// then performs the regular transactional install from that same commit.
 			bootstrap := filepath.Join(directory, lockfile.DefaultFilename)
-			if err := lockfile.Write(bootstrap, snapshot.Lock); err != nil {
+			bootstrapLock := &lockfile.File{Schema: snapshot.Lock.Schema, Pack: snapshot.Lock.Pack}
+			if err := lockfile.Write(bootstrap, bootstrapLock); err != nil {
 				return nil, err
 			}
-			result, err := syncer.RunRevision(ctx, directory, params.Revision, progress)
+			result, err := syncer.RunRevisionConfirmed(ctx, directory, params.Revision, progress, params.ConfirmedConflicts)
 			if err != nil {
 				_ = os.Remove(bootstrap)
 				return nil, err

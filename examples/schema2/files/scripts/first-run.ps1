@@ -1,0 +1,1 @@
+Write-Host "Welcome to Tech Magic"

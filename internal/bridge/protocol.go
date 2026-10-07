@@ -24,8 +24,9 @@ type Request struct {
 }
 
 type Error struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
+	Code    string         `json:"code"`
+	Message string         `json:"message"`
+	Details map[string]any `json:"details,omitempty"`
 }
 
 type Event struct {
@@ -56,7 +57,8 @@ func terminal(id string, result any, err error) Event {
 	event := Event{Protocol: Protocol, Type: "result", ID: id, Result: result}
 	if err != nil {
 		event.Result = nil
-		event.Error = &Error{Code: failure.Code(err), Message: err.Error()}
+		details, _ := failure.Details(err).(map[string]any)
+		event.Error = &Error{Code: failure.Code(err), Message: err.Error(), Details: details}
 	}
 	return event
 }
