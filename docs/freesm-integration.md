@@ -36,20 +36,30 @@ advertised for player application until its transactional installer is ready.
 Author scan preferences have a separate `.modlock/author.toml` file for include
 directories, exclusions, and ignored mod IDs.
 
-Protocol-1 bridge exposes `capabilities`, `read`, `check`, `apply`, and
-`save-author-settings` for schema 1, with NDJSON progress, cancellation, and typed errors. The loader uses
+Protocol-1 bridge exposes `capabilities`, `read`, `install`, `verify`, `check`,
+`apply`, `scan`, and `save-author-settings` for schema 1, with NDJSON progress,
+cancellation, and typed errors. `verify` works offline, checks managed files for
+safe paths, regular non-empty file type, and SHA-256 where available. Legacy
+entries without hashes are reported as unverified rather than content-matched.
+`check` reports the local installation state without modifying files; applying a
+checked commit reinstalls missing or damaged managed mods and verifies staged
+downloads before changing the instance. The loader uses
 its verified adjacent payload for bridge calls, bypassing shared CLI updates.
 Tests cover fragmented JSON, progress, cancellation, incompatible protocol,
 malformed/oversized messages, and branch movement between preview and apply.
 Real loader/payload smoke checks passed with spaces and Cyrillic in the root.
-The launcher now has an asynchronous `QProcess` adapter that passes an argument
+The launcher has an asynchronous `QProcess` adapter that passes an argument
 array, parses fragmented NDJSON, preserves structured error codes, keeps stderr
-separate, and sends cooperative cancellation. Startup checks bridge and loader
-protocol compatibility and offers the fork's releases page on mismatch. Six Qt
-tests cover compatibility, incompatible payloads, fragmented progress/results,
-structured errors, cancellation, and CRLF stderr handling. See
-[bridge-protocol.md](bridge-protocol.md). Import and update pages are not wired
-to these operations yet.
+separate, and sends cooperative cancellation. It retains the bridge and window
+until the process exits, even after cancellation or a terminal JSON event.
+Instance creation treats Minecraft-download and ModLock post-install cancellation
+as cancellation, and registers only successful installs. ModLock update and
+launch paths verify the installed revision and restore missing or damaged mods;
+offline launch is offered only after local verification passes. Startup checks
+bridge and loader protocol compatibility and offers the fork's releases page on
+mismatch. Qt tests cover compatibility, incompatible payloads, fragmented
+progress/results, structured errors, cancellation with delayed process exit, and
+CRLF stderr handling. See [bridge-protocol.md](bridge-protocol.md).
 
 ## Local Windows builds
 
@@ -106,14 +116,17 @@ Initial CI run: https://github.com/natimys/FreesmLauncher/actions/runs/375041282
 - Go owns synchronization, lock parsing, source detection, and Git publishing.
 - Qt owns Minecraft components, instances, interface, and game launch.
 - Go bridge stdout must contain only protocol-1 NDJSON; diagnostics use stderr.
-- Check returns a Git commit and diff; apply must install that same commit.
-- Cancel is a protocol message; file application must complete or roll back.
+- Check returns a Git commit, diff, and local installation state; apply must
+  install that same commit and repair missing or damaged managed mods.
+- Verify is offline and read-only. Cancel is a protocol message; file application
+  must complete or roll back before the process exits.
 - Schema 2 includes profile component IDs/versions, file policies, and SHA-256;
   schema 1 remains readable and requires manual component selection.
-- Instance creation needs a ModLock step after the standard game download and
-  before registration. `InstanceCreationTask` currently downloads game files
-  after `createInstance()` and must be extended carefully.
-- Add a dedicated launch step; preserve the user's pre-launch commands.
+- Instance creation runs ModLock install after the standard game download and
+  before registration. ModLock download cancellation is terminal; ordinary
+  instance creation retains its existing skip behavior.
+- The dedicated launch step preserves the user's pre-launch commands and blocks
+  launch when file recovery fails.
 - Component changes create a new instance rather than migrating the existing one.
 - Author mode disables automatic local pack updates, uses installed Git
   credentials, and publishes only explicitly managed content.
@@ -122,6 +135,5 @@ Initial CI run: https://github.com/natimys/FreesmLauncher/actions/runs/375041282
 The fork's `Freesm ModLock Windows x64` workflow builds the integrated launcher,
 tests Qt and Go, smoke-tests the bundled bridge, and uploads the player package.
 Initial run passed: https://github.com/natimys/FreesmLauncher/actions/runs/37516540359
-Transactional schema 2 installation, the remaining bridge operations, Qt
-import/update pages, author editor, and full release acceptance checks remain
-pending implementation.
+Transactional schema 2 installation, the author editor, and the full offline,
+recovery, and installation acceptance scenarios remain pending implementation.

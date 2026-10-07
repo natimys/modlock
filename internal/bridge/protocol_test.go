@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -62,6 +63,63 @@ func TestBridgeScansModsByContentHash(t *testing.T) {
 	}
 	if len(result.Mods) != 1 || result.Mods[0].Filename != "пример.jar" || result.Mods[0].Size != int64(len("jar bytes")) || len(result.Mods[0].SHA256) != 64 {
 		t.Fatalf("scan result: %#v", result)
+	}
+}
+
+func TestBridgeAdvertisesAndRunsOfflineVerify(t *testing.T) {
+	root := t.TempDir()
+	mods := filepath.Join(root, "mods")
+	if err := os.MkdirAll(mods, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(mods, "local.jar"), []byte("local bytes"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	pack := lockfile.Pack{Repository: "https://offline.invalid/pack.git", Branch: "main", LockPath: "mod.lock", ModsDir: "mods"}
+	manifest := &lockfile.File{Schema: 1, Pack: pack, Mods: []lockfile.ModEntry{{Filename: "local.jar", Source: "repo", Path: "files/local.jar"}}}
+	if err := lockfile.Write(filepath.Join(root, lockfile.DefaultFilename), manifest); err != nil {
+		t.Fatal(err)
+	}
+
+	var capabilities bytes.Buffer
+	if err := Run([]string{"--protocol", "1", "--root", root}, strings.NewReader(`{"type":"request","id":"caps","operation":"capabilities"}`), &capabilities); err != nil {
+		t.Fatal(err)
+	}
+	capEvents := events(t, capabilities.Bytes())
+	encoded, err := json.Marshal(capEvents[0].Result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var capResult struct {
+		Operations []string `json:"operations"`
+	}
+	if err = json.Unmarshal(encoded, &capResult); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(capResult.Operations, "verify") {
+		t.Fatalf("operations omit verify: %#v", capResult.Operations)
+	}
+
+	var output bytes.Buffer
+	request := `{"type":"request","id":"verify","operation":"verify"}`
+	if err := Run([]string{"--protocol", "1", "--root", root}, strings.NewReader(request), &output); err != nil {
+		t.Fatal(err)
+	}
+	verifyEvents := events(t, output.Bytes())
+	encoded, err = json.Marshal(verifyEvents[0].Result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result struct {
+		State         string   `json:"state"`
+		NeedsRecovery bool     `json:"needs_recovery"`
+		Unverified    []string `json:"unverified"`
+	}
+	if err = json.Unmarshal(encoded, &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.State != "unverified" || result.NeedsRecovery || len(result.Unverified) != 1 || result.Unverified[0] != "local.jar" {
+		t.Fatalf("offline verify result: %#v", result)
 	}
 }
 

@@ -188,7 +188,7 @@ func VerifyLock(root string, lock *lockfile.File) (LocalCheck, error) {
 	if err != nil {
 		return LocalCheck{}, err
 	}
-	result := LocalCheck{State: "healthy"}
+	result := LocalCheck{State: "healthy", Missing: []string{}, Damaged: []string{}, Unverified: []string{}}
 	for _, mod := range lock.Mods {
 		path, err := lockfile.ResolveWithin(modsDir, mod.Filename)
 		if err != nil {
