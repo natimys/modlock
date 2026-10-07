@@ -101,6 +101,54 @@ func Migrate(args []string) error {
 	return nil
 }
 
+// MigrateSchema3 explicitly upgrades a schema 2 lock without changing its
+// historical client-only meaning. The exclusive backup is created before the
+// atomic lock replacement, and an existing backup stops the migration.
+func MigrateSchema3(args []string) error {
+	if len(args) != 0 {
+		return fmt.Errorf("usage: modlock migrate-schema3")
+	}
+	root, err := FindRoot(true)
+	if err != nil {
+		return err
+	}
+	path, err := lockfile.FindPath(root)
+	if err != nil {
+		return fmt.Errorf("find schema 2 lock: %w", err)
+	}
+	lock, err := lockfile.Read(path)
+	if err != nil {
+		return err
+	}
+	if lock.Schema != 2 {
+		return fmt.Errorf("%s uses schema %d; migrate-schema3 only accepts schema 2", path, lock.Schema)
+	}
+	backup := path + ".schema2.bak"
+	if _, err := os.Lstat(backup); err == nil {
+		return fmt.Errorf("backup already exists: %s; move it before retrying", backup)
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("check backup path: %w", err)
+	}
+	for i := range lock.Mods {
+		lock.Mods[i].Targets = []string{"client"}
+	}
+	for i := range lock.Files {
+		lock.Files[i].Targets = []string{"client"}
+	}
+	lock.Schema = 3
+	if err := lock.Validate(); err != nil {
+		return fmt.Errorf("schema 3 migration validation failed: %w", err)
+	}
+	if err := copyFileExclusive(path, backup); err != nil {
+		return fmt.Errorf("preserve schema 2 lock: %w", err)
+	}
+	if err := lockfile.Write(path, lock); err != nil {
+		return fmt.Errorf("migration failed; original schema 2 lock is preserved at %s: %w", backup, err)
+	}
+	fmt.Printf("Migrated %s to schema 3. Schema 2 backup: %s\n", path, backup)
+	return nil
+}
+
 func sha256File(path string) (string, error) {
 	f, err := os.Open(path)
 	if err != nil {

@@ -62,6 +62,49 @@ func TestSchema2RejectsReservedTargets(t *testing.T) {
 		}
 	}
 }
+
+func TestSchema3RoundTripTargetsAndStableOrder(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "mod.lock")
+	hash := hex.EncodeToString(sha256.New().Sum(nil))
+	want := &File{Schema: 3,
+		Pack:  Pack{Repository: "https://example.test/pack.git", Name: "Example", Version: "1", Components: []Component{{ID: "net.minecraft", Version: "1.21.1"}}},
+		Mods:  []ModEntry{{ID: "shared", Filename: "shared.jar", Source: "repo", Path: "files/shared.jar", SHA256: hash, Targets: []string{"server", "client", "custom"}}},
+		Files: []ManagedFile{{Path: "files/config/a", Target: "config/a", SHA256: hash, Policy: "replace", Targets: []string{"server", "client"}}},
+	}
+	if err := Write(p, want); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Read(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Schema != 3 || len(got.Mods[0].Targets) != 3 || got.Mods[0].Targets[0] != "client" || got.Mods[0].Targets[1] != "server" || got.Mods[0].Targets[2] != "custom" {
+		t.Fatalf("unexpected schema 3 round trip/order: %#v", got)
+	}
+}
+
+func TestSchema3RejectsInvalidOrDuplicateTargets(t *testing.T) {
+	hash := hex.EncodeToString(sha256.New().Sum(nil))
+	base := func(ids []string) *File {
+		return &File{Schema: 3, Pack: Pack{Repository: "https://example.test/pack.git", Name: "Example", Version: "1"}, Mods: []ModEntry{{Filename: "a.jar", Source: "repo", Path: "files/a.jar", SHA256: hash, Targets: ids}}}
+	}
+	for _, ids := range [][]string{{}, {""}, {"../client"}, {"a/b"}, {"client", "client"}, {"Client"}, {"bad.id"}} {
+		if err := base(ids).Validate(); err == nil {
+			t.Errorf("accepted targets %q", ids)
+		}
+	}
+}
+
+func TestSchema3AllowsSameDestinationForDisjointTargets(t *testing.T) {
+	hash := hex.EncodeToString(sha256.New().Sum(nil))
+	lock := &File{Schema: 3, Pack: Pack{Repository: "https://example.test/pack.git", Branch: "main", LockPath: "mod.lock", ModsDir: "mods", Name: "Example", Version: "1"}, Mods: []ModEntry{
+		{ID: "client-mod", Filename: "same.jar", Source: "repo", Path: "files/client.jar", SHA256: hash, Targets: []string{"client"}},
+		{ID: "server-mod", Filename: "same.jar", Source: "repo", Path: "files/server.jar", SHA256: hash, Targets: []string{"server"}},
+	}}
+	if err := lock.Validate(); err != nil {
+		t.Fatalf("disjoint target destinations should be valid: %v", err)
+	}
+}
 func TestReadRejectsProviderWithoutURL(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "x")
 	os.WriteFile(p, []byte("schema=1\n[pack]\nrepository='x'\n[[mods]]\nfilename='a.jar'\nsource='modrinth'\n"), 0644)

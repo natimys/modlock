@@ -55,24 +55,26 @@ type Component struct {
 
 // ManagedFile maps a repository path to an instance path.
 type ManagedFile struct {
-	Path   string `toml:"path" json:"path"`
-	Target string `toml:"target" json:"target"`
-	SHA256 string `toml:"sha256" json:"sha256"`
-	Policy string `toml:"policy" json:"policy"`
+	Path    string   `toml:"path" json:"path"`
+	Target  string   `toml:"target" json:"target"`
+	SHA256  string   `toml:"sha256" json:"sha256"`
+	Policy  string   `toml:"policy" json:"policy"`
+	Targets []string `toml:"targets,omitempty" json:"targets,omitempty"`
 }
 
 type ModEntry struct {
-	ID        string `toml:"id,omitempty" json:"id,omitempty"`
-	Version   string `toml:"version,omitempty" json:"version,omitempty"`
-	Filename  string `toml:"filename" json:"filename"`
-	Source    string `toml:"source" json:"source"`
-	ProjectID string `toml:"project_id,omitempty" json:"project_id,omitempty"`
-	VersionID string `toml:"version_id,omitempty" json:"version_id,omitempty"`
-	ModID     int64  `toml:"mod_id,omitempty" json:"mod_id,omitempty"`
-	FileID    int64  `toml:"file_id,omitempty" json:"file_id,omitempty"`
-	URL       string `toml:"url,omitempty" json:"url,omitempty"`
-	Path      string `toml:"path,omitempty" json:"path,omitempty"`
-	SHA256    string `toml:"sha256,omitempty" json:"sha256,omitempty"`
+	ID        string   `toml:"id,omitempty" json:"id,omitempty"`
+	Version   string   `toml:"version,omitempty" json:"version,omitempty"`
+	Filename  string   `toml:"filename" json:"filename"`
+	Source    string   `toml:"source" json:"source"`
+	ProjectID string   `toml:"project_id,omitempty" json:"project_id,omitempty"`
+	VersionID string   `toml:"version_id,omitempty" json:"version_id,omitempty"`
+	ModID     int64    `toml:"mod_id,omitempty" json:"mod_id,omitempty"`
+	FileID    int64    `toml:"file_id,omitempty" json:"file_id,omitempty"`
+	URL       string   `toml:"url,omitempty" json:"url,omitempty"`
+	Path      string   `toml:"path,omitempty" json:"path,omitempty"`
+	SHA256    string   `toml:"sha256,omitempty" json:"sha256,omitempty"`
+	Targets   []string `toml:"targets,omitempty" json:"targets,omitempty"`
 }
 
 // Identity returns a stable key for matching versions of the same mod.
@@ -157,7 +159,7 @@ func (f *File) Defaults() {
 }
 
 func (f *File) Validate() error {
-	if f.Schema != 1 && f.Schema != 2 {
+	if f.Schema != 1 && f.Schema != 2 && f.Schema != 3 {
 		return fmt.Errorf("unsupported lock schema %d", f.Schema)
 	}
 	if strings.TrimSpace(f.Pack.Repository) == "" {
@@ -172,7 +174,7 @@ func (f *File) Validate() error {
 	if reservedManagedTarget(f.Pack.ModsDir) {
 		return fmt.Errorf("pack.mods_dir uses a reserved ModLock or Git path")
 	}
-	if f.Schema == 2 {
+	if f.Schema >= 2 {
 		if strings.TrimSpace(f.Pack.Name) == "" || strings.TrimSpace(f.Pack.Version) == "" {
 			return fmt.Errorf("schema 2 requires pack.name and pack.version")
 		}
@@ -187,7 +189,35 @@ func (f *File) Validate() error {
 	}
 	seen := map[string]bool{}
 	identities := map[string]bool{}
-	targets := map[string]bool{}
+	destinations := map[string]map[string]bool{}
+	addDestination := func(targetIDs []string, target string, index int, kind string) error {
+		if f.Schema < 3 {
+			targetIDs = []string{"legacy"}
+		} else if err := validateTargetIDs(targetIDs); err != nil {
+			return fmt.Errorf("%s[%d]: %w", kind, index, err)
+		}
+		clean := strings.ToLower(filepath.ToSlash(filepath.Clean(filepath.FromSlash(target))))
+		if reservedManagedTarget(clean) {
+			return fmt.Errorf("%s[%d]: destination uses a reserved ModLock or Git path", kind, index)
+		}
+		for _, targetID := range targetIDs {
+			paths := destinations[targetID]
+			if paths == nil {
+				paths = map[string]bool{}
+				destinations[targetID] = paths
+			}
+			if paths[clean] {
+				return fmt.Errorf("%s[%d]: destination overlaps another managed file", kind, index)
+			}
+			for existing := range paths {
+				if strings.HasPrefix(existing, clean+"/") || strings.HasPrefix(clean, existing+"/") {
+					return fmt.Errorf("%s[%d]: destination overlaps another managed path", kind, index)
+				}
+			}
+			paths[clean] = true
+		}
+		return nil
+	}
 	for i, m := range f.Mods {
 		if err := safeRelative(m.Filename); err != nil || strings.ContainsAny(m.Filename, "/\\") {
 			return fmt.Errorf("mods[%d]: invalid filename", i)
@@ -195,15 +225,14 @@ func (f *File) Validate() error {
 		if m.Filename == "" || filepath.Base(m.Filename) != m.Filename || strings.ToLower(filepath.Ext(m.Filename)) != ".jar" {
 			return fmt.Errorf("mods[%d]: invalid filename", i)
 		}
-		modTarget := strings.ToLower(filepath.ToSlash(filepath.Join(f.Pack.ModsDir, m.Filename)))
-		if reservedManagedTarget(modTarget) {
-			return fmt.Errorf("mods[%d]: destination uses a reserved ModLock or Git path", i)
+		modTarget := filepath.ToSlash(filepath.Join(f.Pack.ModsDir, m.Filename))
+		if err := addDestination(m.Targets, modTarget, i, "mods"); err != nil {
+			return err
 		}
-		targets[modTarget] = true
-		if f.Schema == 2 && !validSHA256(m.SHA256) {
-			return fmt.Errorf("mods[%d] %s: schema 2 requires a SHA-256 digest", i, m.Filename)
+		if f.Schema >= 2 && !validSHA256(m.SHA256) {
+			return fmt.Errorf("mods[%d] %s: schema %d requires a SHA-256 digest", i, m.Filename, f.Schema)
 		}
-		if seen[strings.ToLower(m.Filename)] {
+		if f.Schema < 3 && seen[strings.ToLower(m.Filename)] {
 			return fmt.Errorf("mods[%d]: duplicate filename %q", i, m.Filename)
 		}
 		seen[strings.ToLower(m.Filename)] = true
@@ -225,8 +254,8 @@ func (f *File) Validate() error {
 		}
 	}
 	for i, managed := range f.Files {
-		if f.Schema != 2 {
-			return fmt.Errorf("files[%d]: managed files require schema 2", i)
+		if f.Schema < 2 {
+			return fmt.Errorf("files[%d]: managed files require schema 2 or newer", i)
 		}
 		if err := safeRelative(managed.Path); err != nil {
 			return fmt.Errorf("files[%d]: invalid repository path: %w", i, err)
@@ -244,17 +273,51 @@ func (f *File) Validate() error {
 		if reservedManagedTarget(target) {
 			return fmt.Errorf("files[%d]: destination uses a reserved ModLock or Git path", i)
 		}
-		if targets[target] {
-			return fmt.Errorf("files[%d]: destination overlaps another managed file", i)
+		if err := addDestination(managed.Targets, managed.Target, i, "files"); err != nil {
+			return err
 		}
-		for existing := range targets {
-			if strings.HasPrefix(existing, target+"/") || strings.HasPrefix(target, existing+"/") {
-				return fmt.Errorf("files[%d]: destination overlaps another managed path", i)
-			}
-		}
-		targets[target] = true
 	}
 	return nil
+}
+
+func validateTargetIDs(ids []string) error {
+	if len(ids) == 0 {
+		return fmt.Errorf("targets must contain at least one target ID")
+	}
+	seen := map[string]bool{}
+	for _, id := range ids {
+		if len(id) == 0 || len(id) > 64 || id[0] < 'a' || id[0] > 'z' {
+			return fmt.Errorf("invalid target ID %q", id)
+		}
+		for _, c := range id[1:] {
+			if (c < 'a' || c > 'z') && (c < '0' || c > '9') && c != '_' && c != '-' {
+				return fmt.Errorf("invalid target ID %q", id)
+			}
+		}
+		if seen[id] {
+			return fmt.Errorf("duplicate target ID %q", id)
+		}
+		seen[id] = true
+	}
+	return nil
+}
+
+// ValidateTargetID checks one portable logical target identifier.
+func ValidateTargetID(id string) error { return validateTargetIDs([]string{id}) }
+
+func sortTargetIDs(ids []string) {
+	priority := map[string]int{"client": 0, "server": 1}
+	sort.Slice(ids, func(i, j int) bool {
+		pi, iok := priority[ids[i]]
+		pj, jok := priority[ids[j]]
+		if iok != jok {
+			return iok
+		}
+		if iok {
+			return pi < pj
+		}
+		return ids[i] < ids[j]
+	})
 }
 
 func reservedManagedTarget(target string) bool {
@@ -311,6 +374,12 @@ func ValidateRelative(p string) error { return safeRelative(p) }
 func Write(path string, f *File) error {
 	f.Defaults()
 	sort.Slice(f.Mods, func(i, j int) bool { return strings.ToLower(f.Mods[i].Filename) < strings.ToLower(f.Mods[j].Filename) })
+	for i := range f.Mods {
+		sortTargetIDs(f.Mods[i].Targets)
+	}
+	for i := range f.Files {
+		sortTargetIDs(f.Files[i].Targets)
+	}
 	if err := f.Validate(); err != nil {
 		return err
 	}
