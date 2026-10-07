@@ -364,6 +364,31 @@ func TestApplyRejectsRepositoryFileWithWrongHashBeforeChangingInstallation(t *te
 	}
 }
 
+func TestApplyRejectsModTargetThatChangesDuringPreparation(t *testing.T) {
+	pack := lockfile.Pack{Repository: "", Branch: "master", LockPath: "mod.lock", ModsDir: "mods"}
+	oldMod := lockfile.ModEntry{ID: "test:mod", Version: "1", Filename: "same.jar", Source: "repo", Path: "files/mods/old.jar"}
+	nextMod := lockfile.ModEntry{ID: "test:mod", Version: "2", Filename: "same.jar", Source: "repo", Path: "files/mods/new.jar"}
+	root, remote, _ := syncFixture(t, pack, pack, []lockfile.ModEntry{oldMod}, []lockfile.ModEntry{nextMod})
+	pack.Repository = remote
+	if err := lockfile.Write(filepath.Join(root, "mod.lock"), &lockfile.File{Schema: 1, Pack: pack, Mods: []lockfile.ModEntry{oldMod}}); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(root, "mods", "same.jar")
+	_, err := Run(context.Background(), root, func(message string) {
+		if strings.Contains(message, "same.jar") {
+			if writeErr := os.WriteFile(target, []byte("changed during preparation"), 0644); writeErr != nil {
+				t.Errorf("change mod during preparation: %v", writeErr)
+			}
+		}
+	})
+	if failure.Code(err) != failure.Conflict {
+		t.Fatalf("stale mod plan was applied: %v", err)
+	}
+	if got, readErr := os.ReadFile(target); readErr != nil || string(got) != "changed during preparation" {
+		t.Fatalf("local mod was overwritten: %q, %v", got, readErr)
+	}
+}
+
 func syncFixture(t *testing.T, oldPack, nextPack lockfile.Pack, oldMods, nextMods []lockfile.ModEntry) (string, string, *git.Worktree) {
 	t.Helper()
 	if oldPack.Repository == "" {

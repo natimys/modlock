@@ -51,6 +51,7 @@ type targetState struct {
 	exists  bool
 	regular bool
 	sha256  string
+	name    string
 }
 
 func snapshotManagedTargets(root string, old, next *lockfile.File) (map[string]targetState, error) {
@@ -101,6 +102,43 @@ func changedManagedTarget(before, after map[string]targetState) string {
 		}
 	}
 	return ""
+}
+
+func snapshotModTargets(modsDir string, names []string) (map[string]targetState, error) {
+	entries, err := os.ReadDir(modsDir)
+	if err != nil && !os.IsNotExist(err) {
+		return nil, err
+	}
+	actualNames := make(map[string]string, len(entries))
+	for _, entry := range entries {
+		actualNames[strings.ToLower(entry.Name())] = entry.Name()
+	}
+	states := make(map[string]targetState, len(names))
+	for _, name := range names {
+		key := strings.ToLower(name)
+		actual := actualNames[key]
+		if actual == "" {
+			states[key] = targetState{}
+			continue
+		}
+		path, err := lockfile.ResolveWithin(modsDir, actual)
+		if err != nil {
+			return nil, err
+		}
+		info, err := os.Lstat(path)
+		if err != nil {
+			return nil, err
+		}
+		state := targetState{exists: true, regular: info.Mode().IsRegular(), name: actual}
+		if state.regular {
+			state.sha256, err = hashFile(path)
+			if err != nil {
+				return nil, err
+			}
+		}
+		states[key] = state
+	}
+	return states, nil
 }
 
 func RunRevisionConfirmed(ctx context.Context, root, revision string, progress Progress, confirmed []ConfirmedConflict) (Result, error) {
@@ -243,6 +281,18 @@ func run(ctx context.Context, root, revision string, progress Progress, confirme
 	for _, name := range installNames {
 		if actual, ok := existing[strings.ToLower(name)]; ok && !managed[strings.ToLower(name)] {
 			return Result{}, failure.Wrap(failure.Conflict, fmt.Errorf("cannot install %s: it conflicts with unmanaged file %s", name, actual))
+		}
+	}
+	modTargets := append(append([]string{}, removeNames...), installNames...)
+	modBefore, err := snapshotModTargets(modsDir, modTargets)
+	if err != nil {
+		return Result{}, err
+	}
+	for _, state := range modBefore {
+		if state.exists && !state.regular {
+			target := filepath.ToSlash(filepath.Join(old.Pack.ModsDir, state.name))
+			conflict := FileConflict{Target: target, Reason: "mod target is not a regular file"}
+			return Result{}, failure.WrapDetails(failure.Conflict, fmt.Errorf("mod target %s is not a regular file", target), map[string]any{"conflicts": []FileConflict{conflict}})
 		}
 	}
 
@@ -498,6 +548,19 @@ func run(ctx context.Context, root, revision string, progress Progress, confirme
 		latestConflicts = append(latestConflicts, FileConflict{Target: filepath.ToSlash(changed), SHA256: state.sha256, Reason: "target changed during preparation"})
 		sort.Slice(latestConflicts, func(i, j int) bool { return latestConflicts[i].Target < latestConflicts[j].Target })
 		return Result{}, failure.WrapDetails(failure.Conflict, fmt.Errorf("managed file changed during preparation: %s", changed), map[string]any{"conflicts": latestConflicts})
+	}
+	modAfter, stateErr := snapshotModTargets(modsDir, modTargets)
+	if stateErr != nil {
+		return Result{}, stateErr
+	}
+	if changed := changedManagedTarget(modBefore, modAfter); changed != "" {
+		state := modAfter[changed]
+		target := filepath.ToSlash(filepath.Join(old.Pack.ModsDir, state.name))
+		if !state.exists {
+			target = filepath.ToSlash(filepath.Join(old.Pack.ModsDir, filepath.Base(changed)))
+		}
+		conflict := FileConflict{Target: target, SHA256: state.sha256, Reason: "mod target changed during preparation"}
+		return Result{}, failure.WrapDetails(failure.Conflict, fmt.Errorf("mod target changed during preparation: %s", target), map[string]any{"conflicts": []FileConflict{conflict}})
 	}
 	for _, conflict := range conflicts {
 		path, resolveErr := lockfile.ResolveWithin(root, conflict.Target)
