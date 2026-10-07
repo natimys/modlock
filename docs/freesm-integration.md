@@ -139,6 +139,25 @@ Initial CI run: https://github.com/natimys/FreesmLauncher/actions/runs/375041282
 The fork's `Freesm ModLock Windows x64` workflow builds the integrated launcher,
 tests Qt and Go, smoke-tests the bundled bridge, and uploads the player package.
 Initial run passed: https://github.com/natimys/FreesmLauncher/actions/runs/37516540359
-Transactional schema 2 installation in Go is covered by tests for file policies,
-deletion, conflict confirmation, empty files, and offline verification. Qt-side
-automatic schema 2 profile creation and conflict interaction remain to be wired.
+Transactional schema 2 installation in Go uses the same managed-file preview
+rules during apply, returns structured conflict details, and accepts exact
+SHA-256 confirmations for install and update. New `replace` files and
+`if_missing` to `replace` transitions require user choice when local content
+would be replaced; equal content needs no write. Missing `if_missing` entries
+are included in offline recovery checks. The first-install bootstrap lock only
+contains pack metadata.
+
+The ModLock import page accepts schemas 1 and 2. Schema 2 resolves only the
+exact Minecraft and optional Fabric, Quilt, Forge, or NeoForge versions from
+Freesm metadata, creates the profile directly from that checked preview, and
+shows the pack name/version, game components, and file count. Source edits
+invalidate the preview and pending installation task. Schema 1 keeps manual
+component selection.
+
+Initial installation, manual update, and pre-launch update use one conflict
+dialog with affected paths and replace/delete actions. Applying a build passes
+the observed hashes back to Go; keeping local files defers the entire update.
+A stale confirmation returns updated conflicts and prompts again. Managed-pack
+properties show readable changes, build version, and Git revision separately.
+The integrated Release workflow builds and installs the player package and
+runs all Qt tests, Go tests, and the bundled bridge smoke check.
