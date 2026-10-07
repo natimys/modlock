@@ -127,6 +127,29 @@ func TestRepoSourceSync(t *testing.T) {
 	}
 }
 
+func TestApplyRejectsRepositoryFileWithWrongHashBeforeChangingInstallation(t *testing.T) {
+	pack := lockfile.Pack{Branch: "master", LockPath: "mod.lock", ModsDir: "mods"}
+	wrongHash := strings.Repeat("0", 64)
+	root, remote, _ := syncFixture(t, pack, pack, nil, []lockfile.ModEntry{{ID: "test:mod", Filename: "new.jar", Source: "repo", Path: "files/mods/new.jar", SHA256: wrongHash}})
+	pack.Repository = remote
+	if err := lockfile.Write(filepath.Join(root, "mod.lock"), &lockfile.File{Schema: 1, Pack: pack}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(filepath.Join(root, "mod.lock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Run(context.Background(), root, nil); err == nil || !strings.Contains(err.Error(), "SHA-256 does not match") {
+		t.Fatalf("Run error = %v; want hash mismatch", err)
+	}
+	if got, err := os.ReadFile(filepath.Join(root, "mod.lock")); err != nil || string(got) != string(before) {
+		t.Fatalf("lock changed after staged hash failure: %q, %v", got, err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "mods", "new.jar")); !os.IsNotExist(err) {
+		t.Fatalf("bad staged file reached instance: %v", err)
+	}
+}
+
 func syncFixture(t *testing.T, oldPack, nextPack lockfile.Pack, oldMods, nextMods []lockfile.ModEntry) (string, string, *git.Worktree) {
 	t.Helper()
 	if oldPack.Repository == "" {

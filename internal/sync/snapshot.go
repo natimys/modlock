@@ -2,11 +2,15 @@ package sync
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 
 	git "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
@@ -100,9 +104,21 @@ func Fetch(ctx context.Context, source lockfile.Pack, revision string, progress 
 }
 
 type Preview struct {
-	Revision string         `json:"revision"`
-	Lock     *lockfile.File `json:"lock"`
-	Diff     diff.Result    `json:"diff"`
+	Revision          string         `json:"revision"`
+	Lock              *lockfile.File `json:"lock"`
+	Diff              diff.Result    `json:"diff"`
+	LocalInstallation LocalCheck     `json:"local_installation"`
+}
+
+// LocalCheck describes only files managed by the selected lock. Files without
+// a digest are checked for presence, regular-file type, and non-empty contents,
+// but cannot be claimed as content-verified.
+type LocalCheck struct {
+	State         string   `json:"state"`
+	NeedsRecovery bool     `json:"needs_recovery"`
+	Missing       []string `json:"missing"`
+	Damaged       []string `json:"damaged"`
+	Unverified    []string `json:"unverified,omitempty"`
 }
 
 // Check does not install anything. Its commit can be supplied to RunRevision.
@@ -128,5 +144,119 @@ func Check(ctx context.Context, root string, progress Progress) (Preview, error)
 	if err := requireSupportedInstallSchema(old, snapshot.Lock); err != nil {
 		return Preview{}, err
 	}
-	return Preview{Revision: snapshot.Revision, Lock: snapshot.Lock, Diff: diff.Locks(old, snapshot.Lock)}, nil
+	local, err := VerifyLock(root, snapshot.Lock)
+	if err != nil {
+		return Preview{}, err
+	}
+	result := diff.Locks(old, snapshot.Lock)
+	needs := make(map[string]bool)
+	for _, name := range local.Missing {
+		needs[name] = true
+	}
+	for _, name := range local.Damaged {
+		needs[name] = true
+	}
+	for _, mod := range snapshot.Lock.Mods {
+		if !needs[mod.Filename] {
+			continue
+		}
+		found := false
+		for _, entry := range result.Added {
+			if entry == mod.Filename {
+				found = true
+				break
+			}
+		}
+		for _, entry := range result.Updated {
+			if entry.New.Filename == mod.Filename {
+				found = true
+				break
+			}
+		}
+		if !found {
+			result.Added = append(result.Added, mod.Filename)
+		}
+	}
+	sort.Strings(result.Added)
+	result.Unchanged = len(snapshot.Lock.Mods) - len(result.Added) - len(result.Updated)
+	return Preview{Revision: snapshot.Revision, Lock: snapshot.Lock, Diff: result, LocalInstallation: local}, nil
+}
+
+// VerifyLock checks local managed mod files without contacting the network.
+func VerifyLock(root string, lock *lockfile.File) (LocalCheck, error) {
+	modsDir, err := lockfile.ResolveWithin(root, lock.Pack.ModsDir)
+	if err != nil {
+		return LocalCheck{}, err
+	}
+	result := LocalCheck{State: "healthy"}
+	for _, mod := range lock.Mods {
+		path, err := lockfile.ResolveWithin(modsDir, mod.Filename)
+		if err != nil {
+			return LocalCheck{}, err
+		}
+		info, err := os.Lstat(path)
+		if os.IsNotExist(err) {
+			result.Missing = append(result.Missing, mod.Filename)
+			continue
+		}
+		if err != nil {
+			return LocalCheck{}, fmt.Errorf("check installed mod %s: %w", mod.Filename, err)
+		}
+		if !info.Mode().IsRegular() || info.Size() == 0 {
+			result.Damaged = append(result.Damaged, mod.Filename)
+			continue
+		}
+		if mod.SHA256 == "" {
+			result.Unverified = append(result.Unverified, mod.Filename)
+			continue
+		}
+		file, err := os.Open(path)
+		if err != nil {
+			return LocalCheck{}, fmt.Errorf("read installed mod %s: %w", mod.Filename, err)
+		}
+		hash := sha256.New()
+		_, copyErr := io.Copy(hash, file)
+		closeErr := file.Close()
+		if copyErr != nil {
+			return LocalCheck{}, fmt.Errorf("hash installed mod %s: %w", mod.Filename, copyErr)
+		}
+		if closeErr != nil {
+			return LocalCheck{}, closeErr
+		}
+		if !strings.EqualFold(hex.EncodeToString(hash.Sum(nil)), mod.SHA256) {
+			result.Damaged = append(result.Damaged, mod.Filename)
+		}
+	}
+	sort.Strings(result.Missing)
+	sort.Strings(result.Damaged)
+	sort.Strings(result.Unverified)
+	result.NeedsRecovery = len(result.Missing)+len(result.Damaged) > 0
+	if result.NeedsRecovery {
+		result.State = "incomplete"
+	} else if len(result.Unverified) > 0 {
+		result.State = "unverified"
+	}
+	return result, nil
+}
+
+// Verify checks the installed lock and managed files without network access.
+// It shares the sync lock with Check and RunRevision.
+func Verify(root string) (LocalCheck, error) {
+	release, err := acquireSyncLock(root)
+	if err != nil {
+		return LocalCheck{}, err
+	}
+	defer release()
+	path, err := lockfile.FindPath(root)
+	if err != nil {
+		return LocalCheck{}, err
+	}
+	lock, err := lockfile.Read(path)
+	if err != nil {
+		return LocalCheck{}, err
+	}
+	if err := requireSupportedInstallSchema(lock, nil); err != nil {
+		return LocalCheck{}, err
+	}
+	return VerifyLock(root, lock)
 }

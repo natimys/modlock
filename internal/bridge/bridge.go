@@ -38,7 +38,7 @@ func Run(args []string, input io.Reader, output io.Writer) error {
 	return Serve(context.Background(), input, output, func(ctx context.Context, request Request, progress func(string)) (any, error) {
 		switch request.Operation {
 		case "capabilities":
-			return map[string]any{"protocol": Protocol, "version": buildinfo.Version, "loader_protocol": buildinfo.LoaderProtocol, "schemas": []int{1}, "operations": []string{"capabilities", "read", "install", "check", "apply", "scan", "save-author-settings"}, "cancel": true}, nil
+			return map[string]any{"protocol": Protocol, "version": buildinfo.Version, "loader_protocol": buildinfo.LoaderProtocol, "schemas": []int{1}, "operations": []string{"capabilities", "read", "install", "verify", "check", "apply", "scan", "save-author-settings"}, "cancel": true}, nil
 		case "read":
 			var source lockfile.Pack
 			if err := decode(request.Params, &source); err != nil {
@@ -91,6 +91,8 @@ func Run(args []string, input io.Reader, output io.Writer) error {
 			return result, nil
 		case "check":
 			return syncer.Check(ctx, directory, progress)
+		case "verify":
+			return syncer.Verify(directory)
 		case "apply":
 			var params struct {
 				Revision string `json:"revision"`

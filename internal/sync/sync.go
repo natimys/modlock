@@ -2,7 +2,10 @@ package sync
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -89,17 +92,15 @@ func run(ctx context.Context, root, revision string, progress Progress) (Result,
 	for _, update := range d.Updated {
 		install[update.New.Filename] = true
 	}
-	for _, m := range next.Mods {
-		if install[m.Filename] {
-			continue
+	local, err := VerifyLock(root, next)
+	if err != nil {
+		return Result{}, err
+	}
+	for _, name := range append(append([]string{}, local.Missing...), local.Damaged...) {
+		if !install[name] {
+			d.Added = append(d.Added, name)
 		}
-		_, statErr := os.Stat(filepath.Join(modsDir, m.Filename))
-		if os.IsNotExist(statErr) {
-			d.Added = append(d.Added, m.Filename)
-			install[m.Filename] = true
-		} else if statErr != nil {
-			return Result{}, fmt.Errorf("check installed mod %s: %w", m.Filename, statErr)
-		}
+		install[name] = true
 	}
 	sort.Strings(d.Added)
 	d.Unchanged = len(next.Mods) - len(d.Added) - len(d.Updated)
@@ -203,6 +204,9 @@ func run(ctx context.Context, root, revision string, progress Progress) (Result,
 				return Result{}, failure.Wrap(failure.Network, fmt.Errorf("download %s: %w", name, err))
 			}
 		}
+		if err := verifyStagedMod(dst, m); err != nil {
+			return Result{}, failure.Wrap(failure.UnsupportedFormat, fmt.Errorf("verify downloaded mod %s: %w", name, err))
+		}
 	}
 
 	// Build one case-insensitive list of affected paths and fully back it up.
@@ -298,6 +302,36 @@ func run(ctx context.Context, root, revision string, progress Progress) (Result,
 		_ = os.Remove(oldPath)
 	}
 	return Result{Diff: d, Revision: snapshot.Revision}, nil
+}
+
+func verifyStagedMod(path string, mod lockfile.ModEntry) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() || info.Size() == 0 {
+		return fmt.Errorf("file must be a non-empty regular file")
+	}
+	if mod.SHA256 == "" {
+		return nil
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	hash := sha256.New()
+	_, copyErr := io.Copy(hash, file)
+	closeErr := file.Close()
+	if copyErr != nil {
+		return copyErr
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	if !strings.EqualFold(hex.EncodeToString(hash.Sum(nil)), mod.SHA256) {
+		return fmt.Errorf("SHA-256 does not match lock")
+	}
+	return nil
 }
 
 func requireSupportedInstallSchema(local, remote *lockfile.File) error {
