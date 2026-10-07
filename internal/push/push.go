@@ -4,7 +4,10 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -125,6 +128,10 @@ type Summary struct {
 }
 
 func Prepare(ctx context.Context, root string, old *lockfile.File, ignored *ignorefile.File, progress func(int, int, string, string)) (*lockfile.File, map[string]string, []string, Summary, error) {
+	return prepare(ctx, root, old, ignored, providers.New(), progress)
+}
+
+func prepare(ctx context.Context, root string, old *lockfile.File, ignored *ignorefile.File, det *providers.Detector, progress func(int, int, string, string)) (*lockfile.File, map[string]string, []string, Summary, error) {
 	modsDir, resolveErr := lockfile.ResolveWithin(root, old.Pack.ModsDir)
 	if resolveErr != nil {
 		return nil, nil, nil, Summary{}, resolveErr
@@ -158,7 +165,6 @@ func Prepare(ctx context.Context, root string, old *lockfile.File, ignored *igno
 		}
 	}
 	next.Mods = kept
-	det := providers.New()
 	oldByIdentity := map[string]lockfile.ModEntry{}
 	for _, m := range old.Mods {
 		oldByIdentity[m.Identity()] = m
@@ -181,6 +187,10 @@ func Prepare(ctx context.Context, root string, old *lockfile.File, ignored *igno
 			s.Added--
 			progress(i+1, len(d.Added), n, "ignored")
 			continue
+		}
+		m.SHA256, e = hashFile(filepath.Join(modsDir, n))
+		if e != nil {
+			return nil, nil, nil, s, fmt.Errorf("hash %s: %w", n, e)
 		}
 		if previous, ok := oldByIdentity[m.Identity()]; ok && removed[previous.Filename] {
 			s.Updated++
@@ -212,6 +222,19 @@ func Prepare(ctx context.Context, root string, old *lockfile.File, ignored *igno
 		}
 	}
 	return &next, copies, filtered, s, nil
+}
+
+func hashFile(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 func Apply(root string, next *lockfile.File, copies map[string]string, deletes []string, message string) error {

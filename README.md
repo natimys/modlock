@@ -122,6 +122,8 @@ path = "files/mods/my-compat.jar"
 
 `id` is the stable identity of a mod; it stays the same when the version, filename, or URL changes. `version` describes the installed release. A lock-to-lock diff reports matching IDs as `updated` instead of unrelated removal and addition. Older locks without these fields remain readable through provider-ID fallback.
 
+When `modlock push` publishes a newly added JAR, it records that file's SHA-256 after source detection, for Modrinth, CurseForge, and repository files alike. Existing lock entries keep their current hashes. Older entries without `sha256` remain compatible and are reported as unverified; publishing another mod does not backfill them. `verify` detects changed content when a hash is present, and applying the same checked revision restores a missing or damaged JAR. If rollback itself fails during an install, the bridge reports `recovery_failed`; Freesm keeps the staged instance and shows its recovery location. Ordinary cancellation removes staging only after the bridge process exits and never registers the incomplete instance.
+
 ## CurseForge
 
 `CURSEFORGE_API_KEY` is optional and used by `init`, `diff`, and `push` for fingerprint detection. The official CurseForge API requires this key. Without it—or if detection fails—unknown mods are shown explicitly before `init`/`push` stores them in the Git repository as `source = "repo"`.

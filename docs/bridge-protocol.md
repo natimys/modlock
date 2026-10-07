@@ -64,6 +64,11 @@ its final event is authoritative. Qt must not normally terminate or kill it.
   the commit matches. Staged files must be regular, non-empty files and match any
   lock SHA-256 before the transaction begins. An unavailable commit fails instead
   of installing the tip.
+- Newly published JAR entries include a SHA-256 digest regardless of whether
+  the author selected Modrinth, CurseForge, or repository storage. Existing
+  entries without a digest remain readable and are reported as unverified;
+  `push` does not backfill old records. `verify` detects changed JAR contents,
+  and `apply` repairs them even when the checked commit is still current.
 - `save-author-settings`: writes `include_dirs`, `exclude_paths`, and
   `ignored_mod_ids` to `.modlock/author.toml`, separately from the published lock.
 - `scan`: returns the installed JAR inventory, SHA-256 and sizes. Existing lock
@@ -81,6 +86,11 @@ Errors contain a stable `code` and a displayable `message`. Codes are `network`,
 Qt uses the code, never parses message text. A transport failure writing stdout
 is reported on stderr and exits nonzero. Protocol/operation errors are terminal
 JSON events; consumers must inspect the event instead of only the exit code.
+If cancellation arrives but rollback fails, the bridge still returns
+`recovery_failed` with the backup location. Freesm treats this as a failed
+installation, preserves the staged instance, and shows its location. Ordinary
+`cancelled` results remove staging after the bridge process exits; the incomplete
+instance is not registered.
 
 Player repository fetching uses the embedded Go Git implementation, not installed
 Git. Author publication will use installed Git and its credential manager/SSH.
