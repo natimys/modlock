@@ -3,6 +3,8 @@ package bridge
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -142,6 +144,138 @@ func TestBridgeSavesSeparateAuthorSettings(t *testing.T) {
 		t.Fatalf("settings: %#v", settings)
 	}
 }
+
+func TestAuthorStateAndTargetMutationUseTypedBridgeData(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "minecraft")
+	server := filepath.Join(t.TempDir(), "server")
+	if err := os.MkdirAll(filepath.Join(root, "mods"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(server, "mods"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	clientData, serverData := []byte("same jar"), []byte("wrong jar")
+	if err := os.WriteFile(filepath.Join(root, "mods", "same.jar"), clientData, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(server, "mods", "same.jar"), serverData, 0644); err != nil {
+		t.Fatal(err)
+	}
+	h := sha256.Sum256(clientData)
+	pack := lockfile.Pack{Repository: "https://example.test/pack.git", Branch: "main", LockPath: "mod.lock", ModsDir: "mods", Name: "Pack", Version: "1"}
+	lock := &lockfile.File{Schema: 3, Pack: pack, Mods: []lockfile.ModEntry{{ID: "modrinth:shared", Filename: "same.jar", Version: "1.2", Source: "repo", Path: "files/mods/same.jar", SHA256: hex.EncodeToString(h[:]), Targets: []string{"server", "client"}}}}
+	if err := lockfile.Write(filepath.Join(root, "mod.lock"), lock); err != nil {
+		t.Fatal(err)
+	}
+	settings := &authorconfig.Config{TrackedPaths: []authorconfig.TrackedPath{{Path: "kubejs", Targets: []string{"client", "server"}, Policy: "replace"}}}
+	if err := authorconfig.Write(root, settings); err != nil {
+		t.Fatal(err)
+	}
+	for _, targetRoot := range []string{root, server} {
+		if err := os.MkdirAll(filepath.Join(targetRoot, "kubejs"), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(targetRoot, "kubejs", "startup.js"), []byte("StartupEvents.registry('item', event => {})\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	input := `{"type":"request","id":"state","operation":"author-state","params":{"target_roots":{"client":` + quote(root) + `,"server":` + quote(server) + `}}}`
+	var output bytes.Buffer
+	if err := Run([]string{"--protocol", "1", "--root", root}, strings.NewReader(input), &output); err != nil {
+		t.Fatal(err)
+	}
+	stateEvents := events(t, output.Bytes())
+	if len(stateEvents) != 1 || stateEvents[0].Error != nil {
+		t.Fatalf("author-state failed: %#v", stateEvents)
+	}
+	encoded, err := json.Marshal(stateEvents[0].Result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result struct {
+		Mods []struct {
+			Identity     string              `json:"identity"`
+			Targets      []string            `json:"targets"`
+			Status       string              `json:"status"`
+			TargetStates []AuthorTargetState `json:"target_states"`
+		} `json:"mods"`
+		Tracked []TrackedPathState `json:"tracked_paths"`
+	}
+	if err = json.Unmarshal(encoded, &result); err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Mods) != 1 || result.Mods[0].Identity != "modrinth:shared" || result.Mods[0].Status != "modified" || len(result.Mods[0].Targets) != 2 || len(result.Mods[0].TargetStates) != 2 || len(result.Tracked) != 1 {
+		t.Fatalf("unexpected author state: %s", encoded)
+	}
+	mutation := `{"type":"request","id":"targets","operation":"set-mod-targets","params":{"id":"modrinth:shared","targets":["client"]}}`
+	output.Reset()
+	if err := Run([]string{"--protocol", "1", "--root", root}, strings.NewReader(mutation), &output); err != nil {
+		t.Fatal(err)
+	}
+	got := events(t, output.Bytes())
+	if len(got) != 1 || got[0].Error != nil {
+		t.Fatalf("target mutation failed: %#v", got)
+	}
+	updated, err := lockfile.Read(filepath.Join(root, "mod.lock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(updated.Mods[0].Targets) != 1 || updated.Mods[0].Targets[0] != "client" {
+		t.Fatalf("target mutation not persisted: %#v", updated.Mods[0].Targets)
+	}
+
+	rootsParams := `"target_roots":{"client":` + quote(root) + `,"server":` + quote(server) + `}`
+	output.Reset()
+	if err := Run([]string{"--protocol", "1", "--root", root}, strings.NewReader(`{"type":"request","id":"scan","operation":"author-scan","params":{`+rootsParams+`}}`), &output); err != nil {
+		t.Fatal(err)
+	}
+	scanEvents := events(t, output.Bytes())
+	if len(scanEvents) != 1 || scanEvents[0].Error != nil {
+		t.Fatalf("author-scan failed: %#v", scanEvents)
+	}
+	scanJSON, _ := json.Marshal(scanEvents[0].Result)
+	var scanObject map[string]json.RawMessage
+	if err := json.Unmarshal(scanJSON, &scanObject); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := scanObject["preview_id"]; ok {
+		t.Fatalf("author-scan must return state only: %s", scanJSON)
+	}
+
+	output.Reset()
+	if err := Run([]string{"--protocol", "1", "--root", root}, strings.NewReader(`{"type":"request","id":"preview","operation":"publish-preview","params":{`+rootsParams+`}}`), &output); err != nil {
+		t.Fatal(err)
+	}
+	previewEvents := events(t, output.Bytes())
+	if len(previewEvents) != 1 || previewEvents[0].Error != nil {
+		t.Fatalf("publish-preview failed: %#v", previewEvents)
+	}
+	previewJSON, _ := json.Marshal(previewEvents[0].Result)
+	var preview AuthorScanResult
+	if err := json.Unmarshal(previewJSON, &preview); err != nil {
+		t.Fatal(err)
+	}
+	if preview.PreviewID == "" || preview.PlannedLock == nil || len(preview.Files.Added) != 2 || len(preview.PlannedLock.Files) != 1 || len(preview.PlannedLock.Files[0].Targets) != 2 {
+		t.Fatalf("unexpected publish preview: %s", previewJSON)
+	}
+	if preview.TargetChanges == nil {
+		t.Fatalf("target_changes must be an empty or populated list: %s", previewJSON)
+	}
+	if err := os.WriteFile(filepath.Join(root, "kubejs", "startup.js"), []byte("changed after preview\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	stale := `{"type":"request","id":"publish","operation":"publish","params":{"preview_id":` + quote(preview.PreviewID) + `,"target_roots":{"client":` + quote(root) + `,"server":` + quote(server) + `}}}`
+	output.Reset()
+	if err := Run([]string{"--protocol", "1", "--root", root}, strings.NewReader(stale), &output); err != nil {
+		t.Fatal(err)
+	}
+	staleEvents := events(t, output.Bytes())
+	if len(staleEvents) != 1 || staleEvents[0].Error == nil || staleEvents[0].Error.Details["kind"] != "changed_during_apply" {
+		t.Fatalf("stale publish was not rejected with a stable conflict kind: %#v", staleEvents)
+	}
+}
+
+func quote(s string) string { b, _ := json.Marshal(s); return string(b) }
 
 func TestBridgeInstallsExactPreviewedSchema1Pack(t *testing.T) {
 	repository := filepath.Join(t.TempDir(), "pack source")

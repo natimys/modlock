@@ -9,6 +9,7 @@ import (
 const (
 	Network             = "network"
 	Git                 = "git_authorization"
+	PushFailed          = "push_failed"
 	UnsupportedFormat   = "unsupported_format"
 	UnsupportedProtocol = "unsupported_protocol"
 	Conflict            = "file_conflict"

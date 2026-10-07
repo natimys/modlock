@@ -38,7 +38,7 @@ func Run(args []string, input io.Reader, output io.Writer) error {
 	return Serve(context.Background(), input, output, func(ctx context.Context, request Request, progress func(string)) (any, error) {
 		switch request.Operation {
 		case "capabilities":
-			return map[string]any{"protocol": Protocol, "version": buildinfo.Version, "loader_protocol": buildinfo.LoaderProtocol, "schemas": []int{1, 2, 3}, "operations": []string{"capabilities", "read", "install", "verify", "check", "apply", "scan", "save-author-settings"}, "cancel": true}, nil
+			return map[string]any{"protocol": Protocol, "version": buildinfo.Version, "loader_protocol": buildinfo.LoaderProtocol, "schemas": []int{1, 2, 3}, "operations": []string{"capabilities", "read", "install", "verify", "check", "apply", "scan", "save-author-settings", "author-state", "author-scan", "publish-preview", "publish", "add-mod", "remove-resource", "set-mod-targets", "set-resource-state", "set-tracked-path", "update-author-settings"}, "cancel": true}, nil
 		case "read":
 			var source lockfile.Pack
 			if err := decode(request.Params, &source); err != nil {
@@ -169,6 +169,8 @@ func Run(args []string, input io.Reader, output io.Writer) error {
 				return nil, err
 			}
 			return map[string]any{"mods": mods}, nil
+		case "author-state", "author-scan", "publish-preview", "publish", "add-mod", "remove-resource", "set-mod-targets", "set-resource-state", "set-tracked-path", "update-author-settings":
+			return runAuthorOperation(ctx, directory, request, progress)
 		default:
 			return nil, failure.Wrap(failure.InvalidRequest, fmt.Errorf("unsupported operation %q", request.Operation))
 		}

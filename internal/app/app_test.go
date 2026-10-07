@@ -50,6 +50,41 @@ func TestMigrateSchema2To3MakesEntriesClientOnlyAndKeepsBackup(t *testing.T) {
 	}
 }
 
+func TestMigrateSchema2To3RefusesExistingBackupWithoutChangingLock(t *testing.T) {
+	root := t.TempDir()
+	oldRoot := os.Getenv(ExplicitRootEnv)
+	t.Cleanup(func() { _ = os.Setenv(ExplicitRootEnv, oldRoot) })
+	if err := os.Setenv(ExplicitRootEnv, root); err != nil {
+		t.Fatal(err)
+	}
+	lock := &lockfile.File{Schema: 2, Pack: lockfile.Pack{Repository: "https://example.test/pack.git", Branch: "main", LockPath: "mod.lock", ModsDir: "mods", Name: "Pack", Version: "1"}}
+	path := filepath.Join(root, "mod.lock")
+	if err := lockfile.Write(path, lock); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path+".schema2.bak", []byte("do not overwrite"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := MigrateSchema3(nil); err == nil {
+		t.Fatal("expected existing-backup refusal")
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backup, err := os.ReadFile(path + ".schema2.bak")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) || string(backup) != "do not overwrite" {
+		t.Fatalf("migration modified inputs: lock=%q backup=%q", after, backup)
+	}
+}
+
 func TestAddRepoSource(t *testing.T) {
 	root := t.TempDir()
 	oldWD, _ := os.Getwd()
