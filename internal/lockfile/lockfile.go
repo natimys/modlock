@@ -169,6 +169,9 @@ func (f *File) Validate() error {
 	if err := safeRelative(f.Pack.ModsDir); err != nil {
 		return fmt.Errorf("invalid pack.mods_dir: %w", err)
 	}
+	if reservedManagedTarget(f.Pack.ModsDir) {
+		return fmt.Errorf("pack.mods_dir uses a reserved ModLock or Git path")
+	}
 	if f.Schema == 2 {
 		if strings.TrimSpace(f.Pack.Name) == "" || strings.TrimSpace(f.Pack.Version) == "" {
 			return fmt.Errorf("schema 2 requires pack.name and pack.version")
@@ -192,7 +195,11 @@ func (f *File) Validate() error {
 		if m.Filename == "" || filepath.Base(m.Filename) != m.Filename || strings.ToLower(filepath.Ext(m.Filename)) != ".jar" {
 			return fmt.Errorf("mods[%d]: invalid filename", i)
 		}
-		targets[strings.ToLower(filepath.ToSlash(filepath.Join(f.Pack.ModsDir, m.Filename)))] = true
+		modTarget := strings.ToLower(filepath.ToSlash(filepath.Join(f.Pack.ModsDir, m.Filename)))
+		if reservedManagedTarget(modTarget) {
+			return fmt.Errorf("mods[%d]: destination uses a reserved ModLock or Git path", i)
+		}
+		targets[modTarget] = true
 		if f.Schema == 2 && !validSHA256(m.SHA256) {
 			return fmt.Errorf("mods[%d] %s: schema 2 requires a SHA-256 digest", i, m.Filename)
 		}
@@ -234,6 +241,9 @@ func (f *File) Validate() error {
 			return fmt.Errorf("files[%d]: policy must be replace or if_missing", i)
 		}
 		target := strings.ToLower(filepath.ToSlash(filepath.Clean(filepath.FromSlash(managed.Target))))
+		if reservedManagedTarget(target) {
+			return fmt.Errorf("files[%d]: destination uses a reserved ModLock or Git path", i)
+		}
 		if targets[target] {
 			return fmt.Errorf("files[%d]: destination overlaps another managed file", i)
 		}
@@ -245,6 +255,16 @@ func (f *File) Validate() error {
 		targets[target] = true
 	}
 	return nil
+}
+
+func reservedManagedTarget(target string) bool {
+	target = strings.Trim(strings.ToLower(filepath.ToSlash(target)), "/")
+	for _, part := range strings.Split(target, "/") {
+		if part == ".git" || part == ".modlock" || strings.HasPrefix(part, ".modlock-") || part == "mod.lock" || part == "modlock.lock" || strings.HasPrefix(part, "mod.lock.") || strings.HasPrefix(part, "modlock.lock.") {
+			return true
+		}
+	}
+	return target == "mod.lock" || target == "modlock.lock"
 }
 
 func validSHA256(s string) bool {

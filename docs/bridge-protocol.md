@@ -1,8 +1,7 @@
 # ModLock bridge protocol 1
 
-This describes the currently implemented service. The lock parser accepts schema
-1 and schema 2, but this bridge advertises and installs schema 1 only. Schema 2
-application, full file-tree scanning, and publication are not implemented.
+This describes the currently implemented service. The lock parser and installer
+support schema 1 and schema 2 while retaining protocol 1.
 
 Start the bundled loader with an argument array, without a shell:
 
@@ -26,7 +25,7 @@ newline is accepted at EOF. Diagnostics go to stderr.
 
 ```json
 {"type":"request","id":"request-1","operation":"capabilities"}
-{"protocol":1,"type":"result","id":"request-1","result":{"protocol":1,"version":"dev","loader_protocol":1,"schemas":[1],"operations":["capabilities","read","install","verify","check","apply","scan","save-author-settings"],"cancel":true}}
+{"protocol":1,"type":"result","id":"request-1","result":{"protocol":1,"version":"dev","loader_protocol":1,"schemas":[1,2],"operations":["capabilities","read","install","verify","check","apply","scan","save-author-settings"],"cancel":true}}
 ```
 
 Progress and the terminal event have the same request ID:
@@ -47,18 +46,23 @@ its final event is authoritative. Qt must not normally terminate or kill it.
 - `read`: `params` contains `repository`, optional `branch`, `lock_path`, and
   `mods_dir`. Returns `revision` and `lock`; does not install files.
 - `install`: `params` contains a `pack` source and the full previewed `revision`.
-  It installs the schema 1 mods transactionally into an empty temporary instance.
-- `verify`: checks the installed lock's managed mods without network access.
+  It installs schema 1 mods or schema 2 mods and managed files transactionally
+  into an empty temporary instance.
+- `verify`: checks the installed lock's managed mods and schema 2 files offline.
   Returns `state` (`healthy`, `unverified`, or `incomplete`), `needs_recovery`,
-  and `missing`, `damaged`, and `unverified` filename lists. It accepts only
-  regular non-empty files. A SHA-256 in the lock is compared with file contents;
-  without a hash, presence and type are checked but content is not confirmed.
+  and `missing`, `damaged`, and `unverified` filename lists. JARs must be regular
+  non-empty files. Schema 2 `replace` files are checked by SHA-256, while
+  `if_missing` files are checked for presence and regular-file type. Managed file
+  issues are reported separately from damaged mods.
 - `check`: reads the local installed lock and returns `revision`, `lock`, and
   `diff` with `added`, `removed`, `updated`, and `unchanged` mods, plus
-  `local_installation` with the verify state. Missing or damaged managed mods
-  appear in `diff.added` even when the remote commit is unchanged. Check does not
-  modify files.
+  `local_installation` with the verify state, and `managed_files` and `conflicts`
+  for managed-file changes with target paths and current SHA-256 values. Missing
+  or damaged managed mods appear in `diff.added` even when the remote commit is
+  unchanged. Check does not modify files.
 - `apply`: `params` contains the full 40-character `revision` returned by `check`.
+  It may also contain `confirmed_conflicts`, an array of `{target, sha256}` values
+  from preview. The current hash is checked again before an overwrite.
   Fetches history and checks out that exact commit. A moved branch does not change
   the applied content. Missing and damaged managed mods are reinstalled even when
   the commit matches. Staged files must be regular, non-empty files and match any
@@ -73,8 +77,7 @@ its final event is authoritative. Qt must not normally terminate or kill it.
   `ignored_mod_ids` to `.modlock/author.toml`, separately from the published lock.
 - `scan`: returns the installed JAR inventory, SHA-256 and sizes. Existing lock
   entries contribute their stable ID, version, and source. Unrecognized JARs
-  remain unidentified for the author to classify. Arbitrary file-tree inventory
-  and initial installation will arrive with the managed-file transaction.
+  remain unidentified for the author to classify.
 
 ```json
 {"type":"request","id":"read-1","operation":"read","params":{"repository":"https://github.com/example/pack.git","branch":"main","lock_path":"mod.lock"}}

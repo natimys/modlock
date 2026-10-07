@@ -31,7 +31,7 @@ var renameInstalledFile = os.Rename
 var restoreBackupFile = providers.Copy
 
 func Run(ctx context.Context, root string, progress Progress) (Result, error) {
-	return run(ctx, root, "", progress)
+	return run(ctx, root, "", progress, nil)
 }
 
 // RunRevision applies the commit returned by Check, even if the branch has moved.
@@ -39,10 +39,22 @@ func RunRevision(ctx context.Context, root, revision string, progress Progress) 
 	if revision == "" {
 		return Result{}, fmt.Errorf("apply requires the previewed Git commit")
 	}
-	return run(ctx, root, revision, progress)
+	return run(ctx, root, revision, progress, nil)
 }
 
-func run(ctx context.Context, root, revision string, progress Progress) (Result, error) {
+type ConfirmedConflict struct {
+	Target string `json:"target"`
+	SHA256 string `json:"sha256"`
+}
+
+func RunRevisionConfirmed(ctx context.Context, root, revision string, progress Progress, confirmed []ConfirmedConflict) (Result, error) {
+	if revision == "" {
+		return Result{}, fmt.Errorf("apply requires the previewed Git commit")
+	}
+	return run(ctx, root, revision, progress, confirmed)
+}
+
+func run(ctx context.Context, root, revision string, progress Progress, confirmed []ConfirmedConflict) (Result, error) {
 	if progress == nil {
 		progress = func(string) {}
 	}
@@ -80,6 +92,22 @@ func run(ctx context.Context, root, revision string, progress Progress) (Result,
 		return Result{}, err
 	}
 	d := diff.Locks(old, next)
+	_, conflicts, err := inspectManagedFiles(root, old, next)
+	if err != nil {
+		return Result{}, err
+	}
+	confirmedByTarget := map[string]string{}
+	for _, c := range confirmed {
+		confirmedByTarget[strings.ToLower(filepath.ToSlash(c.Target))] = strings.ToLower(c.SHA256)
+	}
+	for _, c := range conflicts {
+		if c.Reason != "locally modified managed file" {
+			return Result{}, failure.Wrap(failure.Conflict, fmt.Errorf("%s: %s", c.Target, c.Reason))
+		}
+		if confirmedByTarget[strings.ToLower(filepath.ToSlash(c.Target))] != strings.ToLower(c.SHA256) {
+			return Result{}, failure.Wrap(failure.Conflict, fmt.Errorf("managed file conflict at %s (sha256 %s)", c.Target, c.SHA256))
+		}
+	}
 	modsDir, err := lockfile.ResolveWithin(root, old.Pack.ModsDir)
 	if err != nil {
 		return Result{}, err
@@ -158,10 +186,7 @@ func run(ctx context.Context, root, revision string, progress Progress) (Result,
 		}
 	}
 
-	if err = os.MkdirAll(modsDir, 0755); err != nil {
-		return Result{}, err
-	}
-	txnDir, err := os.MkdirTemp(modsDir, ".modlock-sync-")
+	txnDir, err := os.MkdirTemp(root, ".modlock-sync-")
 	if err != nil {
 		return Result{}, err
 	}
@@ -171,8 +196,8 @@ func run(ctx context.Context, root, revision string, progress Progress) (Result,
 			_ = os.RemoveAll(txnDir)
 		}
 	}()
-	stage := filepath.Join(txnDir, "stage")
-	if err = os.Mkdir(stage, 0755); err != nil {
+	stage := filepath.Join(txnDir, "stage", "mods")
+	if err = os.MkdirAll(stage, 0755); err != nil {
 		return Result{}, err
 	}
 	client := &http.Client{Timeout: 2 * time.Minute}
@@ -208,6 +233,92 @@ func run(ctx context.Context, root, revision string, progress Progress) (Result,
 			return Result{}, failure.Wrap(failure.UnsupportedFormat, fmt.Errorf("verify downloaded mod %s: %w", name, err))
 		}
 	}
+	// Stage and hash every managed payload before touching the instance.
+	managedStage := filepath.Join(txnDir, "stage", "files")
+	type managedOp struct {
+		target, staged string
+		remove         bool
+	}
+	var managedOps []managedOp
+	oldManaged := map[string]lockfile.ManagedFile{}
+	for _, f := range old.Files {
+		oldManaged[strings.ToLower(filepath.ToSlash(f.Target))] = f
+	}
+	nextManaged := map[string]lockfile.ManagedFile{}
+	for _, f := range next.Files {
+		nextManaged[strings.ToLower(filepath.ToSlash(f.Target))] = f
+	}
+	managedTargets := map[string]string{}
+	for k, f := range oldManaged {
+		managedTargets[k] = f.Target
+	}
+	for k, f := range nextManaged {
+		managedTargets[k] = f.Target
+	}
+	var managedKeys []string
+	for k := range managedTargets {
+		managedKeys = append(managedKeys, k)
+	}
+	sort.Strings(managedKeys)
+	for i, key := range managedKeys {
+		target := managedTargets[key]
+		finalPath, resolveErr := lockfile.ResolveWithin(root, target)
+		if resolveErr != nil {
+			return Result{}, resolveErr
+		}
+		info, statErr := os.Lstat(finalPath)
+		exists := statErr == nil
+		if statErr != nil && !os.IsNotExist(statErr) {
+			return Result{}, statErr
+		}
+		if exists && !info.Mode().IsRegular() {
+			return Result{}, failure.Wrap(failure.Conflict, fmt.Errorf("managed target %s is not a regular file", target))
+		}
+		oldFile, hadOld := oldManaged[key]
+		newFile, hasNew := nextManaged[key]
+		if !hasNew {
+			if hadOld && oldFile.Policy == "replace" && exists {
+				digest, hashErr := hashFile(finalPath)
+				if hashErr != nil {
+					return Result{}, hashErr
+				}
+				if !strings.EqualFold(digest, oldFile.SHA256) && confirmedByTarget[key] != strings.ToLower(digest) {
+					return Result{}, failure.Wrap(failure.Conflict, fmt.Errorf("managed file conflict at %s (sha256 %s)", target, digest))
+				}
+				if strings.EqualFold(digest, oldFile.SHA256) || confirmedByTarget[key] == strings.ToLower(digest) {
+					managedOps = append(managedOps, managedOp{target: finalPath, remove: true})
+				}
+			}
+			continue
+		}
+		if newFile.Policy == "if_missing" && exists {
+			continue
+		}
+		if newFile.Policy == "replace" && exists {
+			digest, hashErr := hashFile(finalPath)
+			if hashErr != nil {
+				return Result{}, hashErr
+			}
+			if strings.EqualFold(digest, newFile.SHA256) {
+				continue
+			}
+			if hadOld && oldFile.Policy == "replace" && !strings.EqualFold(digest, oldFile.SHA256) && confirmedByTarget[key] != strings.ToLower(digest) {
+				return Result{}, failure.Wrap(failure.Conflict, fmt.Errorf("managed file conflict at %s (sha256 %s)", target, digest))
+			}
+		}
+		source, resolveErr := lockfile.ResolveWithin(repoDir, newFile.Path)
+		if resolveErr != nil {
+			return Result{}, resolveErr
+		}
+		staged := filepath.Join(managedStage, fmt.Sprintf("%04d", i))
+		if err = providers.Copy(source, staged); err != nil {
+			return Result{}, fmt.Errorf("stage managed file %s: %w", target, err)
+		}
+		if err = verifyStagedManaged(staged, newFile); err != nil {
+			return Result{}, failure.Wrap(failure.UnsupportedFormat, fmt.Errorf("verify managed file %s: %w", target, err))
+		}
+		managedOps = append(managedOps, managedOp{target: finalPath, staged: staged})
+	}
 
 	// Build one case-insensitive list of affected paths and fully back it up.
 	affected := map[string]string{}
@@ -240,6 +351,29 @@ func run(ctx context.Context, root, revision string, progress Progress) (Result,
 		}
 		backups = append(backups, backup{name: name, actual: actual, path: backupPath})
 	}
+	type managedBackup struct{ target, path string }
+	var managedBackups []managedBackup
+	managedBackupDir := filepath.Join(txnDir, "managed-backup")
+	if err = os.Mkdir(managedBackupDir, 0755); err != nil {
+		return Result{}, err
+	}
+	for i, op := range managedOps {
+		info, statErr := os.Lstat(op.target)
+		if os.IsNotExist(statErr) {
+			continue
+		}
+		if statErr != nil {
+			return Result{}, statErr
+		}
+		if !info.Mode().IsRegular() {
+			return Result{}, failure.Wrap(failure.Conflict, fmt.Errorf("managed target is not a regular file: %s", op.target))
+		}
+		backupPath := filepath.Join(managedBackupDir, fmt.Sprintf("%04d.bak", i))
+		if err = providers.Copy(op.target, backupPath); err != nil {
+			return Result{}, fmt.Errorf("backup managed file %s: %w", op.target, err)
+		}
+		managedBackups = append(managedBackups, managedBackup{target: op.target, path: backupPath})
+	}
 	targetLock := filepath.Join(root, lockfile.DefaultFilename)
 	lockTmp, err := atomicfile.Stage(targetLock, newLockBytes, 0644)
 	if err != nil {
@@ -263,6 +397,16 @@ func run(ctx context.Context, root, revision string, progress Progress) (Result,
 				restoreErrs = append(restoreErrs, fmt.Sprintf("restore %s: %v", b.actual, e))
 			}
 		}
+		for _, op := range managedOps {
+			if e := os.Remove(op.target); e != nil && !os.IsNotExist(e) {
+				restoreErrs = append(restoreErrs, fmt.Sprintf("remove %s: %v", op.target, e))
+			}
+		}
+		for _, b := range managedBackups {
+			if e := restoreBackupFile(b.path, b.target); e != nil {
+				restoreErrs = append(restoreErrs, fmt.Sprintf("restore %s: %v", b.target, e))
+			}
+		}
 		if len(restoreErrs) != 0 {
 			keepTxn = true
 			return failure.Wrap(failure.Recovery, fmt.Errorf("%w; rollback incomplete (%s); backups preserved at %s", cause, strings.Join(restoreErrs, "; "), backupDir))
@@ -273,6 +417,22 @@ func run(ctx context.Context, root, revision string, progress Progress) (Result,
 	// Honour cancellation before beginning file mutations. Once they begin,
 	// complete the transaction or rollback instead of abandoning half an update.
 	if err = ctx.Err(); err != nil {
+		return Result{}, err
+	}
+	// Hashes in the confirmation are authorization for one exact observed file.
+	// Recheck immediately before mutation so a file changed during preparation
+	// cannot be overwritten using an earlier preview.
+	for _, conflict := range conflicts {
+		path, resolveErr := lockfile.ResolveWithin(root, conflict.Target)
+		if resolveErr != nil {
+			return Result{}, resolveErr
+		}
+		current, hashErr := hashFile(path)
+		if hashErr != nil || !strings.EqualFold(current, conflict.SHA256) || confirmedByTarget[strings.ToLower(filepath.ToSlash(conflict.Target))] != strings.ToLower(current) {
+			return Result{}, failure.Wrap(failure.Conflict, fmt.Errorf("managed file changed after preview: %s", conflict.Target))
+		}
+	}
+	if err = os.MkdirAll(modsDir, 0755); err != nil {
 		return Result{}, err
 	}
 	for _, name := range removeNames {
@@ -293,6 +453,19 @@ func run(ctx context.Context, root, revision string, progress Progress) (Result,
 		}
 		if err = renameInstalledFile(filepath.Join(stage, name), filepath.Join(modsDir, name)); err != nil {
 			return Result{}, rollback(fmt.Errorf("install %s: %w", name, err))
+		}
+	}
+	for _, op := range managedOps {
+		if err = os.MkdirAll(filepath.Dir(op.target), 0755); err != nil {
+			return Result{}, rollback(fmt.Errorf("create directory for %s: %w", op.target, err))
+		}
+		if err = os.Remove(op.target); err != nil && !os.IsNotExist(err) {
+			return Result{}, rollback(fmt.Errorf("replace managed file %s: %w", op.target, err))
+		}
+		if !op.remove {
+			if err = renameInstalledFile(op.staged, op.target); err != nil {
+				return Result{}, rollback(fmt.Errorf("install managed file %s: %w", op.target, err))
+			}
 		}
 	}
 	if err = commitLockFile(lockTmp, targetLock); err != nil {
@@ -334,13 +507,31 @@ func verifyStagedMod(path string, mod lockfile.ModEntry) error {
 	return nil
 }
 
+func verifyStagedManaged(path string, managed lockfile.ManagedFile) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("file must be regular")
+	}
+	digest, err := hashFile(path)
+	if err != nil {
+		return err
+	}
+	if !strings.EqualFold(digest, managed.SHA256) {
+		return fmt.Errorf("SHA-256 does not match lock")
+	}
+	return nil
+}
+
 func requireSupportedInstallSchema(local, remote *lockfile.File) error {
 	for _, file := range []*lockfile.File{local, remote} {
 		if file == nil {
 			continue
 		}
-		if file.Schema != 1 || len(file.Files) != 0 {
-			return failure.Wrap(failure.UnsupportedFormat, fmt.Errorf("schema %d managed-file packs require the transactional schema 2 installer", file.Schema))
+		if file.Schema != 1 && file.Schema != 2 {
+			return failure.Wrap(failure.UnsupportedFormat, fmt.Errorf("unsupported schema %d", file.Schema))
 		}
 	}
 	return nil

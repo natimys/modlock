@@ -2,6 +2,8 @@ package sync
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"os"
 	"path/filepath"
@@ -16,15 +18,117 @@ import (
 	"modlock/internal/lockfile"
 )
 
-func TestSchema2ApplicationFailsClosed(t *testing.T) {
+func schema2Fixture(t *testing.T, oldFiles, nextFiles []lockfile.ManagedFile, oldData, repoData map[string][]byte) (string, string) {
+	t.Helper()
+	remote := filepath.Join(t.TempDir(), "remote")
+	pack := lockfile.Pack{Repository: remote, Branch: "master", LockPath: "mod.lock", ModsDir: "mods", Name: "Test pack", Version: "1"}
+	for path, data := range repoData {
+		full := filepath.Join(remote, filepath.FromSlash(path))
+		if err := os.MkdirAll(filepath.Dir(full), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, data, 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	next := &lockfile.File{Schema: 2, Pack: pack, Files: nextFiles}
+	if err := lockfile.Write(filepath.Join(remote, "mod.lock"), next); err != nil {
+		t.Fatal(err)
+	}
+	repo, err := git.PlainInit(remote, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w, err := repo.Worktree()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = w.Add("mod.lock"); err != nil {
+		t.Fatal(err)
+	}
+	for path := range repoData {
+		if _, err = w.Add(filepath.ToSlash(path)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err = w.Commit("schema 2", &git.CommitOptions{Author: &object.Signature{Name: "test", Email: "test@example.com", When: time.Now()}}); err != nil {
+		t.Fatal(err)
+	}
+	head, err := repo.Head()
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	for target, data := range oldData {
+		full := filepath.Join(root, filepath.FromSlash(target))
+		if err := os.MkdirAll(filepath.Dir(full), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, data, 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := lockfile.Write(filepath.Join(root, "mod.lock"), &lockfile.File{Schema: 2, Pack: pack, Files: oldFiles}); err != nil {
+		t.Fatal(err)
+	}
+	return root, head.Hash().String()
+}
+
+func managedEntry(path, target, policy string, data []byte) lockfile.ManagedFile {
+	digest := sha256.Sum256(data)
+	return lockfile.ManagedFile{Path: path, Target: target, Policy: policy, SHA256: hex.EncodeToString(digest[:])}
+}
+
+func TestSchema2ApplicationIsSupported(t *testing.T) {
 	local := &lockfile.File{Schema: 1}
 	remote := &lockfile.File{Schema: 2}
-	if err := requireSupportedInstallSchema(local, remote); failure.Code(err) != failure.UnsupportedFormat {
-		t.Fatalf("schema 2 must fail closed, got error=%v code=%s", err, failure.Code(err))
+	if err := requireSupportedInstallSchema(local, remote); err != nil {
+		t.Fatalf("schema 2 was rejected: %v", err)
 	}
-	remote = &lockfile.File{Schema: 1, Files: []lockfile.ManagedFile{{Path: "config/a", Target: "config/a", Policy: "replace"}}}
-	if err := requireSupportedInstallSchema(local, remote); failure.Code(err) != failure.UnsupportedFormat {
-		t.Fatalf("managed files must fail closed, got error=%v code=%s", err, failure.Code(err))
+}
+
+func TestSchema2ManagedFilesPoliciesRemovalAndVerify(t *testing.T) {
+	old := []lockfile.ManagedFile{managedEntry("files/old.cfg", "config/old.cfg", "replace", []byte("old")), managedEntry("files/keep.cfg", "config/keep.cfg", "if_missing", []byte("repository"))}
+	next := []lockfile.ManagedFile{managedEntry("files/empty.cfg", "config/empty.cfg", "replace", nil), managedEntry("files/keep.cfg", "config/keep.cfg", "if_missing", []byte("updated repository"))}
+	root, revision := schema2Fixture(t, old, next, map[string][]byte{"config/old.cfg": []byte("old"), "config/keep.cfg": []byte("user value")}, map[string][]byte{"files/empty.cfg": nil, "files/keep.cfg": []byte("updated repository")})
+	if _, err := RunRevision(context.Background(), root, revision, nil); err != nil {
+		t.Fatal(err)
+	}
+	if data, err := os.ReadFile(filepath.Join(root, "config", "empty.cfg")); err != nil || len(data) != 0 {
+		t.Fatalf("empty managed file: %q, %v", data, err)
+	}
+	if data, err := os.ReadFile(filepath.Join(root, "config", "keep.cfg")); err != nil || string(data) != "user value" {
+		t.Fatalf("if_missing overwrote existing file: %q, %v", data, err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "config", "old.cfg")); !os.IsNotExist(err) {
+		t.Fatalf("unchanged removed replace file remains: %v", err)
+	}
+	check, err := Verify(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(check.ManagedMissing)+len(check.ManagedChanged)+len(check.ManagedConflicts) != 0 {
+		t.Fatalf("managed files failed verification: %#v", check)
+	}
+}
+
+func TestSchema2ConflictNeedsMatchingConfirmation(t *testing.T) {
+	old := []lockfile.ManagedFile{managedEntry("files/config.cfg", "config/config.cfg", "replace", []byte("old"))}
+	next := []lockfile.ManagedFile{managedEntry("files/config.cfg", "config/config.cfg", "replace", []byte("new"))}
+	root, revision := schema2Fixture(t, old, next, map[string][]byte{"config/config.cfg": []byte("local edit")}, map[string][]byte{"files/config.cfg": []byte("new")})
+	localHash := sha256.Sum256([]byte("local edit"))
+	confirmation := ConfirmedConflict{Target: "config/config.cfg", SHA256: hex.EncodeToString(localHash[:])}
+	if _, err := RunRevision(context.Background(), root, revision, nil); failure.Code(err) != failure.Conflict {
+		t.Fatalf("local edit was not reported as a conflict: %v", err)
+	}
+	if _, err := RunRevisionConfirmed(context.Background(), root, revision, nil, []ConfirmedConflict{{Target: confirmation.Target, SHA256: strings.Repeat("0", 64)}}); failure.Code(err) != failure.Conflict {
+		t.Fatalf("stale confirmation was accepted: %v", err)
+	}
+	if _, err := RunRevisionConfirmed(context.Background(), root, revision, nil, []ConfirmedConflict{confirmation}); err != nil {
+		t.Fatal(err)
+	}
+	if data, err := os.ReadFile(filepath.Join(root, "config", "config.cfg")); err != nil || string(data) != "new" {
+		t.Fatalf("confirmed build file not applied: %q, %v", data, err)
 	}
 }
 

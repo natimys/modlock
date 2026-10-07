@@ -38,7 +38,7 @@ func Run(args []string, input io.Reader, output io.Writer) error {
 	return Serve(context.Background(), input, output, func(ctx context.Context, request Request, progress func(string)) (any, error) {
 		switch request.Operation {
 		case "capabilities":
-			return map[string]any{"protocol": Protocol, "version": buildinfo.Version, "loader_protocol": buildinfo.LoaderProtocol, "schemas": []int{1}, "operations": []string{"capabilities", "read", "install", "verify", "check", "apply", "scan", "save-author-settings"}, "cancel": true}, nil
+			return map[string]any{"protocol": Protocol, "version": buildinfo.Version, "loader_protocol": buildinfo.LoaderProtocol, "schemas": []int{1, 2}, "operations": []string{"capabilities", "read", "install", "verify", "check", "apply", "scan", "save-author-settings"}, "cancel": true}, nil
 		case "read":
 			var source lockfile.Pack
 			if err := decode(request.Params, &source); err != nil {
@@ -95,7 +95,8 @@ func Run(args []string, input io.Reader, output io.Writer) error {
 			return syncer.Verify(directory)
 		case "apply":
 			var params struct {
-				Revision string `json:"revision"`
+				Revision           string                     `json:"revision"`
+				ConfirmedConflicts []syncer.ConfirmedConflict `json:"confirmed_conflicts,omitempty"`
 			}
 			if err := decode(request.Params, &params); err != nil {
 				return nil, failure.Wrap(failure.InvalidRequest, err)
@@ -103,7 +104,7 @@ func Run(args []string, input io.Reader, output io.Writer) error {
 			if params.Revision == "" {
 				return nil, failure.Wrap(failure.InvalidRequest, fmt.Errorf("previewed revision is required"))
 			}
-			return syncer.RunRevision(ctx, directory, params.Revision, progress)
+			return syncer.RunRevisionConfirmed(ctx, directory, params.Revision, progress, params.ConfirmedConflicts)
 		case "save-author-settings":
 			var settings authorconfig.Config
 			if err := decode(request.Params, &settings); err != nil {

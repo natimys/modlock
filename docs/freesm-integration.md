@@ -31,19 +31,23 @@ apply and verifies that the previewed JAR content is installed.
 
 Lock parsing accepts schema 1 and schema 2. Schema 2 adds pack name/version,
 profile component IDs and versions, SHA-256 digests, and managed files with
-checked instance targets and `replace`/`if_missing` policies. Schema 2 is not
-advertised for player application until its transactional installer is ready.
+checked instance targets and `replace`/`if_missing` policies. The installer now
+stages mods and managed files under the instance root, checks SHA-256 values,
+backs up every affected file, applies removals and replacements, and writes the
+lock last. Managed `replace` conflicts are reported with their current hash and
+require matching confirmation at apply; `if_missing` preserves existing regular
+files. Offline verify reports managed-file state separately from mod damage.
 Author scan preferences have a separate `.modlock/author.toml` file for include
 directories, exclusions, and ignored mod IDs.
 
 Protocol-1 bridge exposes `capabilities`, `read`, `install`, `verify`, `check`,
-`apply`, `scan`, and `save-author-settings` for schema 1, with NDJSON progress,
+`apply`, `scan`, and `save-author-settings` for schemas 1 and 2, with NDJSON progress,
 cancellation, and typed errors. `verify` works offline, checks managed files for
 safe paths, regular non-empty file type, and SHA-256 where available. Legacy
 entries without hashes are reported as unverified rather than content-matched.
 `check` reports the local installation state without modifying files; applying a
-checked commit reinstalls missing or damaged managed mods and verifies staged
-downloads before changing the instance. The loader uses
+checked commit reinstalls missing or damaged mods and applies managed-file changes
+from the exact previewed Git commit. The loader uses
 its verified adjacent payload for bridge calls, bypassing shared CLI updates.
 Tests cover fragmented JSON, progress, cancellation, incompatible protocol,
 malformed/oversized messages, and branch movement between preview and apply.
@@ -135,5 +139,6 @@ Initial CI run: https://github.com/natimys/FreesmLauncher/actions/runs/375041282
 The fork's `Freesm ModLock Windows x64` workflow builds the integrated launcher,
 tests Qt and Go, smoke-tests the bundled bridge, and uploads the player package.
 Initial run passed: https://github.com/natimys/FreesmLauncher/actions/runs/37516540359
-Transactional schema 2 installation, the author editor, and the full offline,
-recovery, and installation acceptance scenarios remain pending implementation.
+Transactional schema 2 installation in Go is covered by tests for file policies,
+deletion, conflict confirmation, empty files, and offline verification. Qt-side
+automatic schema 2 profile creation and conflict interaction remain to be wired.

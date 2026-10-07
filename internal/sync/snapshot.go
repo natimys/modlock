@@ -104,21 +104,38 @@ func Fetch(ctx context.Context, source lockfile.Pack, revision string, progress 
 }
 
 type Preview struct {
-	Revision          string         `json:"revision"`
-	Lock              *lockfile.File `json:"lock"`
-	Diff              diff.Result    `json:"diff"`
-	LocalInstallation LocalCheck     `json:"local_installation"`
+	Revision          string          `json:"revision"`
+	Lock              *lockfile.File  `json:"lock"`
+	Diff              diff.Result     `json:"diff"`
+	LocalInstallation LocalCheck      `json:"local_installation"`
+	ManagedFiles      []ManagedChange `json:"managed_files"`
+	Conflicts         []FileConflict  `json:"conflicts"`
+}
+
+type ManagedChange struct {
+	Target string `json:"target"`
+	Action string `json:"action"`
+	Policy string `json:"policy"`
+}
+
+type FileConflict struct {
+	Target string `json:"target"`
+	SHA256 string `json:"sha256"`
+	Reason string `json:"reason"`
 }
 
 // LocalCheck describes only files managed by the selected lock. Files without
 // a digest are checked for presence, regular-file type, and non-empty contents,
 // but cannot be claimed as content-verified.
 type LocalCheck struct {
-	State         string   `json:"state"`
-	NeedsRecovery bool     `json:"needs_recovery"`
-	Missing       []string `json:"missing"`
-	Damaged       []string `json:"damaged"`
-	Unverified    []string `json:"unverified,omitempty"`
+	State            string   `json:"state"`
+	NeedsRecovery    bool     `json:"needs_recovery"`
+	Missing          []string `json:"missing"`
+	Damaged          []string `json:"damaged"`
+	Unverified       []string `json:"unverified,omitempty"`
+	ManagedMissing   []string `json:"managed_missing,omitempty"`
+	ManagedChanged   []string `json:"managed_changed,omitempty"`
+	ManagedConflicts []string `json:"managed_conflicts,omitempty"`
 }
 
 // Check does not install anything. Its commit can be supplied to RunRevision.
@@ -179,7 +196,11 @@ func Check(ctx context.Context, root string, progress Progress) (Preview, error)
 	}
 	sort.Strings(result.Added)
 	result.Unchanged = len(snapshot.Lock.Mods) - len(result.Added) - len(result.Updated)
-	return Preview{Revision: snapshot.Revision, Lock: snapshot.Lock, Diff: result, LocalInstallation: local}, nil
+	managed, conflicts, err := inspectManagedFiles(root, old, snapshot.Lock)
+	if err != nil {
+		return Preview{}, err
+	}
+	return Preview{Revision: snapshot.Revision, Lock: snapshot.Lock, Diff: result, LocalInstallation: local, ManagedFiles: managed, Conflicts: conflicts}, nil
 }
 
 // VerifyLock checks local managed mod files without contacting the network.
@@ -188,7 +209,7 @@ func VerifyLock(root string, lock *lockfile.File) (LocalCheck, error) {
 	if err != nil {
 		return LocalCheck{}, err
 	}
-	result := LocalCheck{State: "healthy", Missing: []string{}, Damaged: []string{}, Unverified: []string{}}
+	result := LocalCheck{State: "healthy", Missing: []string{}, Damaged: []string{}, Unverified: []string{}, ManagedMissing: []string{}, ManagedChanged: []string{}, ManagedConflicts: []string{}}
 	for _, mod := range lock.Mods {
 		path, err := lockfile.ResolveWithin(modsDir, mod.Filename)
 		if err != nil {
@@ -227,16 +248,145 @@ func VerifyLock(root string, lock *lockfile.File) (LocalCheck, error) {
 			result.Damaged = append(result.Damaged, mod.Filename)
 		}
 	}
+	for _, managed := range lock.Files {
+		path, err := lockfile.ResolveWithin(root, managed.Target)
+		if err != nil {
+			return LocalCheck{}, err
+		}
+		info, err := os.Lstat(path)
+		if os.IsNotExist(err) {
+			if managed.Policy == "replace" {
+				result.ManagedMissing = append(result.ManagedMissing, managed.Target)
+			}
+			continue
+		}
+		if err != nil {
+			return LocalCheck{}, fmt.Errorf("check managed file %s: %w", managed.Target, err)
+		}
+		if !info.Mode().IsRegular() {
+			result.ManagedConflicts = append(result.ManagedConflicts, managed.Target)
+			continue
+		}
+		if managed.Policy == "replace" {
+			digest, err := hashFile(path)
+			if err != nil {
+				return LocalCheck{}, err
+			}
+			if !strings.EqualFold(digest, managed.SHA256) {
+				result.ManagedChanged = append(result.ManagedChanged, managed.Target)
+			}
+		}
+	}
 	sort.Strings(result.Missing)
 	sort.Strings(result.Damaged)
 	sort.Strings(result.Unverified)
-	result.NeedsRecovery = len(result.Missing)+len(result.Damaged) > 0
+	sort.Strings(result.ManagedMissing)
+	sort.Strings(result.ManagedChanged)
+	sort.Strings(result.ManagedConflicts)
+	result.NeedsRecovery = len(result.Missing)+len(result.Damaged)+len(result.ManagedMissing)+len(result.ManagedConflicts) > 0
 	if result.NeedsRecovery {
 		result.State = "incomplete"
 	} else if len(result.Unverified) > 0 {
 		result.State = "unverified"
 	}
 	return result, nil
+}
+
+func hashFile(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+func inspectManagedFiles(root string, old, next *lockfile.File) ([]ManagedChange, []FileConflict, error) {
+	oldFiles := map[string]lockfile.ManagedFile{}
+	if old != nil {
+		for _, f := range old.Files {
+			oldFiles[strings.ToLower(filepath.ToSlash(f.Target))] = f
+		}
+	}
+	nextFiles := map[string]lockfile.ManagedFile{}
+	for _, f := range next.Files {
+		nextFiles[strings.ToLower(filepath.ToSlash(f.Target))] = f
+	}
+	keys := map[string]bool{}
+	for k := range oldFiles {
+		keys[k] = true
+	}
+	for k := range nextFiles {
+		keys[k] = true
+	}
+	var changes []ManagedChange
+	var conflicts []FileConflict
+	for key := range keys {
+		prev, hadPrev := oldFiles[key]
+		item, hasNext := nextFiles[key]
+		target := item.Target
+		if !hasNext {
+			target = prev.Target
+		}
+		path, err := lockfile.ResolveWithin(root, target)
+		if err != nil {
+			return nil, nil, err
+		}
+		info, err := os.Lstat(path)
+		exists := err == nil
+		if err != nil && !os.IsNotExist(err) {
+			return nil, nil, err
+		}
+		curHash := ""
+		if exists {
+			if !info.Mode().IsRegular() {
+				conflicts = append(conflicts, FileConflict{Target: target, Reason: "target is not a regular file"})
+				continue
+			}
+			curHash, err = hashFile(path)
+			if err != nil {
+				return nil, nil, err
+			}
+		}
+		action := ""
+		if !hasNext {
+			if prev.Policy == "replace" && exists {
+				if strings.EqualFold(curHash, prev.SHA256) {
+					action = "remove"
+				} else {
+					conflicts = append(conflicts, FileConflict{Target: target, SHA256: curHash, Reason: "locally modified managed file"})
+				}
+			}
+		} else if item.Policy == "if_missing" {
+			if !exists {
+				action = "add"
+			}
+		} else if !exists || !strings.EqualFold(curHash, item.SHA256) {
+			if exists && hadPrev && prev.Policy == "replace" && !strings.EqualFold(curHash, prev.SHA256) {
+				conflicts = append(conflicts, FileConflict{Target: target, SHA256: curHash, Reason: "locally modified managed file"})
+			} else {
+				action = "add"
+				if hadPrev {
+					action = "update"
+				}
+			}
+		}
+		if action != "" {
+			changes = append(changes, ManagedChange{Target: target, Action: action, Policy: func() string {
+				if hasNext {
+					return item.Policy
+				}
+				return prev.Policy
+			}()})
+		}
+	}
+	sort.Slice(changes, func(i, j int) bool { return changes[i].Target < changes[j].Target })
+	sort.Slice(conflicts, func(i, j int) bool { return conflicts[i].Target < conflicts[j].Target })
+	return changes, conflicts, nil
 }
 
 // Verify checks the installed lock and managed files without network access.

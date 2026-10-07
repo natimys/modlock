@@ -52,6 +52,16 @@ func TestResolveWithinRejectsEscape(t *testing.T) {
 		t.Fatal("expected path escape error")
 	}
 }
+
+func TestSchema2RejectsReservedTargets(t *testing.T) {
+	hash := hex.EncodeToString(sha256.New().Sum(nil))
+	for _, target := range []string{".git/config", ".modlock/author.toml", ".modlock-sync-a/stage/file", "mod.lock", "modlock.lock", "config/mod.lock.bak"} {
+		lock := &File{Schema: 2, Pack: Pack{Repository: "https://example.test/pack.git", Name: "Example", Version: "1"}, Files: []ManagedFile{{Path: "files/a", Target: target, SHA256: hash, Policy: "replace"}}}
+		if err := lock.Validate(); err == nil {
+			t.Errorf("reserved target %q was accepted", target)
+		}
+	}
+}
 func TestReadRejectsProviderWithoutURL(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "x")
 	os.WriteFile(p, []byte("schema=1\n[pack]\nrepository='x'\n[[mods]]\nfilename='a.jar'\nsource='modrinth'\n"), 0644)
