@@ -181,6 +181,21 @@ func TestSchema3ApplyVerifyAndRepairAcrossTargets(t *testing.T) {
 	}
 }
 
+func TestSchema3TrustedWorkspaceRootsMapClientAndServerSubdirectories(t *testing.T) {
+	workspace := t.TempDir()
+	client := filepath.Join(workspace, "minecraft")
+	server := filepath.Join(workspace, "server")
+	for _, root := range []string{client, server} {
+		if err := os.MkdirAll(root, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	lock := &lockfile.File{Schema: 3, Mods: []lockfile.ModEntry{{Filename: "server.jar", Targets: []string{"server"}}}}
+	if err := ValidateTargetRoots(workspace, lock, TargetRoots{"client": client, "server": server}); err != nil {
+		t.Fatalf("workspace target map should be accepted: %v", err)
+	}
+}
+
 func TestSchema3OperationsRequireLauncherTargetRoots(t *testing.T) {
 	lock := &lockfile.File{Schema: 3, Pack: lockfile.Pack{Repository: "https://example.test/pack.git", Branch: "main", LockPath: "mod.lock", ModsDir: "mods", Name: "x", Version: "1"}, Mods: []lockfile.ModEntry{{ID: "server", Filename: "server.jar", Source: "repo", Path: "files/server.jar", SHA256: strings.Repeat("a", 64), Targets: []string{"server"}}}}
 	if err := ValidateTargetRoots(t.TempDir(), lock, nil); failure.Code(err) != failure.InvalidRequest {

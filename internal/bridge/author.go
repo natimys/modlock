@@ -29,6 +29,7 @@ type AuthorMod struct {
 	ID           string              `json:"id"`
 	Identity     string              `json:"identity"`
 	Name         string              `json:"name"`
+	IconURL      string              `json:"icon_url,omitempty"`
 	Provider     string              `json:"provider"`
 	ProjectID    string              `json:"project_id,omitempty"`
 	Version      string              `json:"version"`
@@ -349,7 +350,11 @@ func readAuthorState(root string, roots syncer.TargetRoots) (*AuthorState, error
 		if lock.Schema < 3 {
 			ids = []string{"client"}
 		}
-		item := AuthorMod{ID: mod.ID, Identity: mod.Identity(), Name: mod.ID, Provider: mod.Source, ProjectID: mod.ProjectID, Version: mod.DisplayVersion(), VersionID: mod.VersionID, Filename: mod.Filename, Source: mod.Source, SHA256: mod.SHA256, Targets: append([]string(nil), ids...), Managed: true, Status: "synced"}
+		name := mod.Name
+		if name == "" {
+			name = mod.ID
+		}
+		item := AuthorMod{ID: mod.ID, Identity: mod.Identity(), Name: name, IconURL: mod.IconURL, Provider: mod.Source, ProjectID: mod.ProjectID, Version: mod.DisplayVersion(), VersionID: mod.VersionID, Filename: mod.Filename, Source: mod.Source, SHA256: mod.SHA256, Targets: append([]string(nil), ids...), Managed: true, Status: "synced"}
 		if item.Name == "" {
 			item.Name = mod.Filename
 		}

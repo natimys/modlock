@@ -16,7 +16,7 @@ type TargetRoots map[string]string
 // ValidateTargetRoots validates every supplied mapping and ensures all targets
 // referenced by a schema 3 lock can be resolved. Legacy locks deliberately
 // ignore the mapping and continue using the process root.
-func ValidateTargetRoots(processRoot string, lock *lockfile.File, roots TargetRoots) error {
+func ValidateTargetRoots(_ string, lock *lockfile.File, roots TargetRoots) error {
 	if lock == nil || lock.Schema < 3 {
 		return nil
 	}
@@ -32,10 +32,6 @@ func ValidateTargetRoots(processRoot string, lock *lockfile.File, roots TargetRo
 		}
 	}
 	canonical := map[string]string{}
-	processAbs, err := filepath.Abs(filepath.Clean(processRoot))
-	if err != nil {
-		return failure.Wrap(failure.InvalidRequest, fmt.Errorf("invalid process root: %w", err))
-	}
 	for id, value := range roots {
 		if err := lockfile.ValidateTargetID(id); err != nil {
 			return failure.Wrap(failure.InvalidRequest, err)
@@ -46,9 +42,6 @@ func ValidateTargetRoots(processRoot string, lock *lockfile.File, roots TargetRo
 		abs, err := filepath.Abs(filepath.Clean(value))
 		if err != nil {
 			return failure.Wrap(failure.InvalidRequest, fmt.Errorf("invalid target root %q: %w", id, err))
-		}
-		if id == "client" && !strings.EqualFold(filepath.Clean(abs), filepath.Clean(processAbs)) {
-			return failure.Wrap(failure.InvalidRequest, fmt.Errorf("client target root must match the bridge process root"))
 		}
 		key := strings.ToLower(filepath.Clean(abs))
 		if previous, ok := canonical[key]; ok && previous != id {

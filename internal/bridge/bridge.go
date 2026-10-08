@@ -115,6 +115,14 @@ func Run(args []string, input io.Reader, output io.Writer) error {
 				}
 			}
 			return syncer.VerifyWithRoots(directory, params.TargetRoots)
+		case "promote-schema3-lock":
+			var params struct {
+				TargetRoots syncer.TargetRoots `json:"target_roots"`
+			}
+			if err := decode(request.Params, &params); err != nil {
+				return nil, failure.Wrap(failure.InvalidRequest, err)
+			}
+			return promoteSchema3Lock(directory, params.TargetRoots)
 		case "apply":
 			var params struct {
 				Revision           string                     `json:"revision"`

@@ -64,6 +64,8 @@ type ManagedFile struct {
 
 type ModEntry struct {
 	ID        string   `toml:"id,omitempty" json:"id,omitempty"`
+	Name      string   `toml:"name,omitempty" json:"name,omitempty"`
+	IconURL   string   `toml:"icon_url,omitempty" json:"icon_url,omitempty"`
 	Version   string   `toml:"version,omitempty" json:"version,omitempty"`
 	Filename  string   `toml:"filename" json:"filename"`
 	Source    string   `toml:"source" json:"source"`
