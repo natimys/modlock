@@ -38,6 +38,11 @@ func promoteSchema3Lock(workspace string, roots syncer.TargetRoots) (any, error)
 	if err := syncer.ValidateTargetRoots(workspace, old, roots); err != nil {
 		return nil, err
 	}
+	if server := roots["server"]; server != "" {
+		if err := os.MkdirAll(server, 0755); err != nil {
+			return nil, failure.Wrap(failure.InvalidRequest, fmt.Errorf("could not prepare server workspace root: %w", err))
+		}
+	}
 	backup := oldPath + ".workspace.bak"
 	if _, err := os.Lstat(backup); err == nil {
 		return nil, failure.Wrap(failure.Conflict, fmt.Errorf("workspace backup already exists: %s", backup))

@@ -14,10 +14,8 @@ func TestPromoteSchema3LockKeepsBackupAndWritesWorkspaceRoot(t *testing.T) {
 	workspace := t.TempDir()
 	client := filepath.Join(workspace, "minecraft")
 	server := filepath.Join(workspace, "server")
-	for _, root := range []string{client, server} {
-		if err := os.MkdirAll(root, 0755); err != nil {
-			t.Fatal(err)
-		}
+	if err := os.MkdirAll(client, 0755); err != nil {
+		t.Fatal(err)
 	}
 	legacyPath := filepath.Join(client, lockfile.DefaultFilename)
 	lock := &lockfile.File{Schema: 3, Pack: lockfile.Pack{Repository: "https://example.test/pack.git", Branch: "main", LockPath: "mod.lock", ModsDir: "mods", Name: "Test", Version: "1"}, Mods: []lockfile.ModEntry{{ID: "modrinth:test", Filename: "test.jar", Source: "modrinth", URL: "https://example.test/test.jar", Targets: []string{"server"}, SHA256: strings.Repeat("a", 64)}}}
@@ -35,5 +33,8 @@ func TestPromoteSchema3LockKeepsBackupAndWritesWorkspaceRoot(t *testing.T) {
 	}
 	if _, err := os.Stat(legacyPath); !os.IsNotExist(err) {
 		t.Fatalf("legacy lock should be moved to backup, stat error=%v", err)
+	}
+	if info, err := os.Stat(server); err != nil || !info.IsDir() {
+		t.Fatalf("server workspace root was not prepared: info=%v err=%v", info, err)
 	}
 }
