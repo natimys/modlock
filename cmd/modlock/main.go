@@ -80,7 +80,7 @@ func main() {
 		}
 		switch os.Args[1] {
 		case "sync":
-			err = app.Sync(ctx)
+			err = app.Sync(ctx, os.Args[2:]...)
 		case "diff":
 			err = app.Diff()
 		case "push":
@@ -134,7 +134,7 @@ func main() {
 				}
 			}
 		default:
-			fmt.Fprintln(os.Stderr, "Usage: modlock [--root directory] [sync|diff|push|init|migrate|migrate-schema3|add|ignore|revert|version|self-update]")
+			fmt.Fprintln(os.Stderr, "Usage: modlock [--root directory] [sync [--target client|server]|diff|push|init|migrate|migrate-schema3|add|ignore|revert|version|self-update]")
 			os.Exit(2)
 		}
 	}

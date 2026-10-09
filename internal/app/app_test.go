@@ -16,6 +16,30 @@ import (
 	"modlock/internal/providers"
 )
 
+func TestParseSyncTargetDefaultsToClientAndAcceptsExplicitTarget(t *testing.T) {
+	for _, test := range []struct {
+		args []string
+		want string
+	}{
+		{args: nil, want: "client"},
+		{args: []string{"--target", "client"}, want: "client"},
+		{args: []string{"--target=server"}, want: "server"},
+	} {
+		got, err := parseSyncTarget(test.args)
+		if err != nil || got != test.want {
+			t.Fatalf("parseSyncTarget(%q) = %q, %v; want %q", test.args, got, err, test.want)
+		}
+	}
+}
+
+func TestParseSyncTargetRejectsInvalidOrRepeatedTarget(t *testing.T) {
+	for _, args := range [][]string{{"--target"}, {"--target", "custom"}, {"--target=client", "--target=server"}, {"--unknown"}} {
+		if _, err := parseSyncTarget(args); err == nil {
+			t.Errorf("parseSyncTarget(%q) unexpectedly succeeded", args)
+		}
+	}
+}
+
 func TestMigrateSchema2To3MakesEntriesClientOnlyAndKeepsBackup(t *testing.T) {
 	root := t.TempDir()
 	oldRoot := os.Getenv(ExplicitRootEnv)

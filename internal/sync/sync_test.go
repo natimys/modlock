@@ -181,6 +181,102 @@ func TestSchema3ApplyVerifyAndRepairAcrossTargets(t *testing.T) {
 	}
 }
 
+func TestStandaloneSchema3SyncInstallsOnlyClientAndSharedResources(t *testing.T) {
+	client := filepath.Join(t.TempDir(), "Minecraft Instance ü")
+	server := filepath.Join(filepath.Dir(client), "server")
+	if err := os.MkdirAll(client, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(server, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(server, "keep.txt"), []byte("server data"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	digest := func(data []byte) string {
+		h := sha256.Sum256(data)
+		return hex.EncodeToString(h[:])
+	}
+	mods := []lockfile.ModEntry{
+		{ID: "client", Filename: "client.jar", Source: "repo", Path: "files/mods/client.jar", SHA256: digest([]byte("client jar")), Targets: []string{"client"}},
+		{ID: "server", Filename: "server.jar", Source: "repo", Path: "files/mods/server.jar", SHA256: digest([]byte("server jar")), Targets: []string{"server"}},
+		{ID: "shared", Filename: "shared.jar", Source: "repo", Path: "files/mods/shared.jar", SHA256: digest([]byte("shared jar")), Targets: []string{"client", "server"}},
+	}
+	files := []lockfile.ManagedFile{
+		{Path: "files/config/client.cfg", Target: "config/client.cfg", SHA256: digest([]byte("client config")), Policy: "replace", Targets: []string{"client"}},
+		{Path: "files/config/server.cfg", Target: "config/server.cfg", SHA256: digest([]byte("server config")), Policy: "replace", Targets: []string{"server"}},
+		{Path: "files/config/shared.cfg", Target: "config/shared.cfg", SHA256: digest([]byte("shared config")), Policy: "replace", Targets: []string{"client", "server"}},
+	}
+	payloads := map[string][]byte{
+		"files/mods/client.jar": []byte("client jar"), "files/mods/server.jar": []byte("server jar"), "files/mods/shared.jar": []byte("shared jar"),
+		"files/config/client.cfg": []byte("client config"), "files/config/server.cfg": []byte("server config"), "files/config/shared.cfg": []byte("shared config"),
+	}
+	root, _ := schema3Fixture(t, TargetRoots{"client": client}, mods, files, payloads)
+	fixtureLock, err := lockfile.Read(filepath.Join(root, "mod.lock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pack := fixtureLock.Pack
+	oldMods := []lockfile.ModEntry{
+		{ID: "obsolete", Filename: "obsolete.jar", Source: "repo", Path: "files/mods/obsolete.jar", SHA256: digest([]byte("obsolete")), Targets: []string{"client"}},
+		{ID: "server", Filename: "server.jar", Source: "repo", Path: "files/mods/server.jar", SHA256: digest([]byte("server jar")), Targets: []string{"server"}},
+	}
+	oldFiles := []lockfile.ManagedFile{
+		{Path: "files/config/obsolete.cfg", Target: "config/obsolete.cfg", SHA256: digest([]byte("old")), Policy: "replace", Targets: []string{"client"}},
+		{Path: "files/config/server.cfg", Target: "config/server.cfg", SHA256: digest([]byte("old server")), Policy: "replace", Targets: []string{"server"}},
+	}
+	if err := os.MkdirAll(filepath.Join(client, "mods"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(client, "mods", "obsolete.jar"), []byte("obsolete"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(client, "mods", "local.jar"), []byte("unmanaged"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(client, "config"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(client, "config", "obsolete.cfg"), []byte("old"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := lockfile.Write(filepath.Join(root, "mod.lock"), &lockfile.File{Schema: 3, Pack: pack, Mods: oldMods, Files: oldFiles}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := RunForTarget(context.Background(), root, "client", nil); err != nil {
+		t.Fatal(err)
+	}
+	for path, want := range map[string]string{
+		filepath.Join(client, "mods", "client.jar"):   "client jar",
+		filepath.Join(client, "mods", "shared.jar"):   "shared jar",
+		filepath.Join(client, "config", "client.cfg"): "client config",
+		filepath.Join(client, "config", "shared.cfg"): "shared config",
+		filepath.Join(client, "mods", "local.jar"):    "unmanaged",
+	} {
+		got, err := os.ReadFile(path)
+		if err != nil || string(got) != want {
+			t.Fatalf("%s = %q, %v; want %q", path, got, err, want)
+		}
+	}
+	for _, path := range []string{
+		filepath.Join(client, "mods", "server.jar"), filepath.Join(client, "config", "server.cfg"),
+		filepath.Join(server, "mods"), filepath.Join(server, "config"),
+		filepath.Join(client, "mods", "obsolete.jar"), filepath.Join(client, "config", "obsolete.cfg"),
+	} {
+		if _, err := os.Lstat(path); !os.IsNotExist(err) {
+			t.Fatalf("unexpected path exists or could not be checked: %s (%v)", path, err)
+		}
+	}
+	if got, err := os.ReadFile(filepath.Join(server, "keep.txt")); err != nil || string(got) != "server data" {
+		t.Fatalf("server data changed: %q, %v", got, err)
+	}
+	// The canonical lock remains the full pack manifest after a client-only run.
+	installed, err := lockfile.Read(filepath.Join(root, "mod.lock"))
+	if err != nil || len(installed.Mods) != 3 || len(installed.Files) != 3 {
+		t.Fatalf("full remote lock was not preserved: %#v, %v", installed, err)
+	}
+}
+
 func TestSchema3TrustedWorkspaceRootsMapClientAndServerSubdirectories(t *testing.T) {
 	workspace := t.TempDir()
 	client := filepath.Join(workspace, "minecraft")

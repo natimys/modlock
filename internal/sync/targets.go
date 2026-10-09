@@ -13,6 +13,49 @@ import (
 // request-scoped and are never read from or written to a lock file.
 type TargetRoots map[string]string
 
+// selectTarget projects a schema 3 manifest onto one standalone target. The
+// on-disk lock is still updated from the complete remote manifest; this view
+// controls only which target roots the current invocation may touch.
+func selectTarget(lock *lockfile.File, target string) *lockfile.File {
+	selected := *lock
+	selected.Mods = nil
+	selected.Files = nil
+	for _, mod := range lock.Mods {
+		if lock.Schema < 3 {
+			if target == "client" {
+				selected.Mods = append(selected.Mods, mod)
+			}
+			continue
+		}
+		if includesTarget(mod.Targets, target) {
+			mod.Targets = []string{target}
+			selected.Mods = append(selected.Mods, mod)
+		}
+	}
+	for _, file := range lock.Files {
+		if lock.Schema < 3 {
+			if target == "client" {
+				selected.Files = append(selected.Files, file)
+			}
+			continue
+		}
+		if includesTarget(file.Targets, target) {
+			file.Targets = []string{target}
+			selected.Files = append(selected.Files, file)
+		}
+	}
+	return &selected
+}
+
+func includesTarget(targets []string, selected string) bool {
+	for _, target := range targets {
+		if target == selected {
+			return true
+		}
+	}
+	return false
+}
+
 // ValidateTargetRoots validates every supplied mapping and ensures all targets
 // referenced by a schema 3 lock can be resolved. Legacy locks deliberately
 // ignore the mapping and continue using the process root.

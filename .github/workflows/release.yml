@@ -40,6 +40,10 @@ jobs:
           $archive = Get-Item dist/modlock-app-windows-amd64.zip
           $hash = (Get-FileHash $archive.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
           @{ version=$version; platform='windows-amd64'; archive=$archive.Name; size=$archive.Length; sha256=$hash; protocol=1 } | ConvertTo-Json -Compress | Set-Content -Encoding utf8 dist/manifest.json
+      - name: Smoke test release artifacts
+        shell: pwsh
+        run: |
+          .github/scripts/release-smoke.ps1 -DistPath dist -Version "$($env:GITHUB_REF_NAME.TrimStart('v'))" -Commit "$(git rev-parse --short=12 HEAD)" -Repository $env:GITHUB_REPOSITORY
       - name: Publish stable release
         env:
           GH_TOKEN: ${{ github.token }}

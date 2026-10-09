@@ -34,6 +34,16 @@ func Run(ctx context.Context, root string, progress Progress) (Result, error) {
 	return run(ctx, root, "", progress, nil)
 }
 
+// RunForTarget synchronizes one logical target into root. It is intended for
+// standalone installs where the instance directory is the target root. Schema
+// 1/2 locks retain their existing single-root behavior.
+func RunForTarget(ctx context.Context, root, target string, progress Progress) (Result, error) {
+	if target != "client" && target != "server" {
+		return Result{}, failure.Wrap(failure.InvalidRequest, fmt.Errorf("target must be client or server"))
+	}
+	return runWithRoots(ctx, root, "", progress, nil, TargetRoots{target: root}, target)
+}
+
 // RunRevision applies the commit returned by Check, even if the branch has moved.
 func RunRevision(ctx context.Context, root, revision string, progress Progress) (Result, error) {
 	if revision == "" {
@@ -157,7 +167,7 @@ func run(ctx context.Context, root, revision string, progress Progress, confirme
 	return runWithRoots(ctx, root, revision, progress, confirmed, nil)
 }
 
-func runWithRoots(ctx context.Context, root, revision string, progress Progress, confirmed []ConfirmedConflict, roots TargetRoots) (Result, error) {
+func runWithRoots(ctx context.Context, root, revision string, progress Progress, confirmed []ConfirmedConflict, roots TargetRoots, selectedTarget ...string) (Result, error) {
 	if progress == nil {
 		progress = func(string) {}
 	}
@@ -191,6 +201,15 @@ func runWithRoots(ctx context.Context, root, revision string, progress Progress,
 		return Result{}, failure.Wrap(failure.UnsupportedFormat, fmt.Errorf("schema 3 cannot be downgraded to schema %d during sync", next.Schema))
 	}
 	if next.Schema == 3 {
+		if len(selectedTarget) != 0 {
+			target := selectedTarget[0]
+			if old.Schema < 3 && target != "client" {
+				return Result{}, failure.Wrap(failure.UnsupportedFormat, fmt.Errorf("schema %d locks can only be synchronized to the client target", old.Schema))
+			}
+			old = selectTarget(old, target)
+			next = selectTarget(next, target)
+			roots = TargetRoots{target: root}
+		}
 		return runSchema3(ctx, root, oldPath, old, next, repoDir, remoteLock, snapshot.Revision, roots, progress, confirmed)
 	}
 	if filepath.Clean(filepath.FromSlash(next.Pack.ModsDir)) != filepath.Clean(filepath.FromSlash(old.Pack.ModsDir)) {

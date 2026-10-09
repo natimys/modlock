@@ -90,18 +90,52 @@ func readProjectLock(root string) (*lockfile.File, string, error) {
 	return f, p, err
 }
 
-func Sync(ctx context.Context) error {
+func Sync(ctx context.Context, args ...string) error {
+	target, err := parseSyncTarget(args)
+	if err != nil {
+		return err
+	}
 	root, e := FindRoot(true)
 	if e != nil {
 		return e
 	}
-	r, e := syncer.Run(ctx, root, func(s string) { fmt.Println(s) })
+	r, e := syncer.RunForTarget(ctx, root, target, func(s string) { fmt.Println(s) })
 	if e != nil {
 		return e
 	}
 	printDiff("Update applied:", r.Diff)
 	fmt.Println("Сборка обновлена.")
 	return nil
+}
+
+func parseSyncTarget(args []string) (string, error) {
+	target := "client"
+	seen := false
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		value := ""
+		switch {
+		case arg == "--target":
+			i++
+			if i == len(args) {
+				return "", fmt.Errorf("sync --target requires client or server")
+			}
+			value = args[i]
+		case strings.HasPrefix(arg, "--target="):
+			value = strings.TrimPrefix(arg, "--target=")
+		default:
+			return "", fmt.Errorf("unknown sync option %q; usage: modlock sync [--target client|server]", arg)
+		}
+		if seen {
+			return "", fmt.Errorf("sync --target may be specified only once")
+		}
+		seen = true
+		if value != "client" && value != "server" {
+			return "", fmt.Errorf("sync target must be client or server")
+		}
+		target = value
+	}
+	return target, nil
 }
 func Diff() error {
 	root, e := FindRoot(true)
