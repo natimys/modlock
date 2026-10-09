@@ -34,7 +34,9 @@ jobs:
           New-Item -ItemType Directory -Force dist | Out-Null
           $env:GOOS = 'windows'; $env:GOARCH = 'amd64'; $env:CGO_ENABLED = '0'
           go build -trimpath -ldflags $ld -o dist/modlock-app.exe ./cmd/modlock
+          if ($LASTEXITCODE -ne 0) { throw "modlock-app.exe build failed with exit code $LASTEXITCODE" }
           go build -trimpath -ldflags $ld -o dist/modlock.exe ./cmd/launcher
+          if ($LASTEXITCODE -ne 0) { throw "modlock.exe build failed with exit code $LASTEXITCODE" }
           Compress-Archive -Path dist/modlock-app.exe -DestinationPath dist/modlock-app-windows-amd64.zip
           Compress-Archive -Path dist/modlock.exe,dist/modlock-app.exe -DestinationPath dist/modlock-windows-amd64.zip
           $archive = Get-Item dist/modlock-app-windows-amd64.zip
